@@ -15,7 +15,7 @@ MIN_SL_PIPS = {"EURUSD": 18, "GBPJPY": 30, "XAUUSD": 18}
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V6.3 STRONGER - A+ ONLY RUNNING"
+    return "V6.4 ULTIMATE SNIPER REVIVED - 1 TRADE PER DAY"
 
 def send(msg):
     msg = msg.replace("%", " pct").replace("/", " per ")
@@ -36,9 +36,8 @@ def get_data(ysym):
             if r.status_code == 200:
                 j = r.json()
                 res = j["chart"]["result"][0]
-                ts = res["timestamp"]
                 q = res["indicators"]["quote"][0]
-                df = pd.DataFrame({"Close": q["close"], "High": q["high"], "Low": q["low"], "Open": q["open"], "Volume": q["volume"]})
+                df = pd.DataFrame({"Close": q["close"], "High": q["high"], "Low": q["low"], "Open": q["open"]})
                 df = df.dropna().reset_index(drop=True)
                 if len(df) >= 100:
                     return df
@@ -49,8 +48,7 @@ def get_data(ysym):
 
 def get_dxy():
     df = get_data("DX-Y.NYB")
-    if df is None or len(df) < 5:
-        return "NEUTRAL"
+    if df is None or len(df) < 5: return "NEUTRAL"
     try:
         if df["Close"].iloc[-1] > df["Close"].iloc[-5]: return "BULLISH"
         if df["Close"].iloc[-1] < df["Close"].iloc[-5]: return "BEARISH"
@@ -60,30 +58,24 @@ def get_dxy():
 def analyze(name, df):
     try:
         close = df["Close"]; high = df["High"]; low = df["Low"]; open_ = df["Open"]
-        ema20 = close.ewm(span=20).mean()
-        ema50 = close.ewm(span=50).mean()
-        ema200 = close.ewm(span=200).mean()
-        # RSI
+        ema20 = close.ewm(span=20).mean(); ema50 = close.ewm(span=50).mean(); ema200 = close.ewm(span=200).mean()
         delta = close.diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rsi = 100 - (100 / (1 + (gain / (loss + 0.0000001))))
-        # ATR
         tr = pd.concat([high-low, (high-close.shift()).abs(), (low-close.shift()).abs()], axis=1).max(axis=1)
         atr = tr.rolling(14).mean()
-        # VWAP fixed - typical price
         typical = (high + low + close) / 3
         vwap = typical.rolling(20).mean()
-        # MACD
         ema12 = close.ewm(span=12).mean(); ema26 = close.ewm(span=26).mean()
         macd = ema12 - ema26; macd_sig = macd.ewm(span=9).mean()
-        # ADX - trend strength
+        # ADX
         up = high.diff(); down = -low.diff()
         plus_dm = np.where((up > down) & (up > 0), up, 0)
         minus_dm = np.where((down > up) & (down > 0), down, 0)
-        tr_smooth = pd.Series(tr).rolling(14).mean()
-        plus_di = 100 * (pd.Series(plus_dm).rolling(14).mean() / (tr_smooth + 0.0000001))
-        minus_di = 100 * (pd.Series(minus_dm).rolling(14).mean() / (tr_smooth + 0.0000001))
+        tr_s = pd.Series(tr).rolling(14).mean()
+        plus_di = 100 * (pd.Series(plus_dm).rolling(14).mean() / (tr_s + 0.0000001))
+        minus_di = 100 * (pd.Series(minus_dm).rolling(14).mean() / (tr_s + 0.0000001))
         dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di + 0.0000001))
         adx = dx.rolling(14).mean()
 
@@ -91,15 +83,12 @@ def analyze(name, df):
         r = float(rsi.iloc[-1]); a = float(atr.iloc[-1]); v = float(vwap.iloc[-1])
         m = float(macd.iloc[-1]); ms = float(macd_sig.iloc[-1]); adx_v = float(adx.iloc[-1])
         pip = PAIR_PIP[name]
-        # ATR volatility filter - must have movement
         atr_pips = a / pip
-        if atr_pips < 8: # market too dead
-            return None
-        # Candle confirmation
-        last_candle_bull = float(close.iloc[-1]) > float(open_.iloc[-1])
-        last_candle_bear = float(close.iloc[-1]) < float(open_.iloc[-1])
+        if atr_pips < 8: return None
+        last_bull = float(close.iloc[-1]) > float(open_.iloc[-1])
+        last_bear = float(close.iloc[-1]) < float(open_.iloc[-1])
 
-        # 4H trend
+        # V5.4 STYLE: 4H Trend must be STRONG - price far from EMA50 4H
         df4 = df.iloc[::16]
         c4 = df4["Close"]; e50_4 = c4.ewm(span=50).mean()
         trend4 = "BULLISH" if float(c4.iloc[-1]) > float(e50_4.iloc[-1]) else "BEARISH"
@@ -110,45 +99,27 @@ def analyze(name, df):
         else:
             dxy_buy = True; dxy_sell = True
 
-        # STRONGER: 5/5 REQUIRED + ADX + MACD + Candle
-        buy_conditions = [
-            e20 > e50 and e50 > e200,
-            trend4 == "BULLISH",
-            45 < r < 68,
-            price > v,
-            m > ms and adx_v > 25 and last_candle_bull
-        ]
-        sell_conditions = [
-            e20 < e50 and e50 < e200,
-            trend4 == "BEARISH",
-            32 < r < 55,
-            price < v,
-            m < ms and adx_v > 25 and last_candle_bear
-        ]
-        buy_score = sum(buy_conditions)
-        sell_score = sum(sell_conditions)
-
+        # ULTIMATE SNIPER: 5/5 + ADX 25 + MACD + Candle + DXY - ALL MUST AGREE
+        buy = [e20>e50 and e50>e200, trend4=="BULLISH", 45<r<68, price>v, m>ms and adx_v>25 and last_bull]
+        sell = [e20<e50 and e50<e200, trend4=="BEARISH", 32<r<55, price<v, m<ms and adx_v>25 and last_bear]
         direction = None
-        if buy_score == 5 and dxy_buy: direction = "BUY"
-        elif sell_score == 5 and dxy_sell: direction = "SELL"
+        if sum(buy)==5 and dxy_buy: direction="BUY"
+        elif sum(sell)==5 and dxy_sell: direction="SELL"
         else: return None
 
-        # SL TP - ATR 1.5x but min SL
-        sl_pips = max((a * 1.5) / pip, MIN_SL_PIPS[name])
+        sl_pips = max((a*1.5)/pip, MIN_SL_PIPS[name])
         sl_dist = sl_pips * pip
-        if direction == "BUY":
+        if direction=="BUY":
             sl = price - sl_dist; tp1 = price + sl_dist; tp2 = price + sl_dist*2; tp3 = price + sl_dist*3
         else:
             sl = price + sl_dist; tp1 = price - sl_dist; tp2 = price - sl_dist*2; tp3 = price - sl_dist*3
 
         risk_money = BALANCE * 0.05
-        if name == "XAUUSD":
-            lot = round(risk_money / (sl_pips * 1.0), 2)
-        else:
-            lot = round(risk_money / (sl_pips * 10), 2)
+        if name=="XAUUSD": lot = round(risk_money/(sl_pips*1.0),2)
+        else: lot = round(risk_money/(sl_pips*10),2)
         lot = max(0.01, min(lot, 5.0))
 
-        msg = (f"STRONGER SIGNAL - {name} {direction} - A+ SETUP\n"
+        msg = (f"ULTIMATE SNIPER - {name} {direction} - 1 TRADE TODAY\n"
                f"Price: {price:.5f}\n"
                f"Trend 4H: {trend4} | DXY: {dxy}\n"
                f"EMA20: {e20:.5f} EMA50: {e50:.5f} EMA200: {e200:.5f}\n"
@@ -158,7 +129,8 @@ def analyze(name, df):
                f"SL: {sl:.5f} ({sl_pips:.1f} pips)\n"
                f"TP1: {tp1:.5f}\nTP2: {tp2:.5f}\nTP3: {tp3:.5f}\n"
                f"Lot: {lot} | Risk: 5 pct | RR 1 to 3\n"
-               f"Score: 5 per 5 - A+ ONLY")
+               f"Score: 5 per 5 - V5.4 SNIPER REVIVED\n"
+               f"No more trades today. Bot locked.")
         return msg
     except Exception as e:
         print(f"Analyze error {name}: {e}")
@@ -166,23 +138,28 @@ def analyze(name, df):
 
 def bot_loop():
     time.sleep(5)
-    send("V6.3 STRONGER is LIVE - A+ ONLY\n5 per 5 Required - ADX over 25 - MACD Confirm - Candle Confirm - ATR Filter - 1 Trade Per 2 Hours\nNo Weak Signals Anymore")
-    last_signal_hour = -99
+    send("V6.4 ULTIMATE SNIPER REVIVED is LIVE\nV5.4 Brain + V6.3 Fixed Body\n1 Trade Per DAY Only - 5 per 5 A+ - No Revenge Trading - If No Setup, No Signal All Day")
+    traded_date = None
     while True:
         try:
             now = datetime.now(timezone.utc)
+            today = now.date()
+            # Reset each new day
+            if traded_date != today:
+                traded_date = None
             if 7 <= now.hour < 20:
-                # 1 trade per 2 hours
-                if abs(now.hour - last_signal_hour) >= 2:
+                if traded_date is None:
                     for name, ysym in SYMBOLS.items():
                         df = get_data(ysym)
                         if df is None: continue
                         sig = analyze(name, df)
                         if sig:
                             send(sig)
-                            last_signal_hour = now.hour
+                            traded_date = today
                             break
                         time.sleep(3)
+                else:
+                    print(f"Already traded today {today}, locked - V5.4 sniper mode")
             time.sleep(120)
         except Exception as e:
             print(f"Loop error: {e}")
