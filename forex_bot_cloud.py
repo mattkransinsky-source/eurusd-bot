@@ -1,18 +1,21 @@
-import threading, os
-from flask import Flask
-app = Flask(__name__)
-@app.route('/')
-def home(): return "V10 Aggressive Running"
-def run_web():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-threading.Thread(target=run_web, daemon=True).start()
 import os
 import time
 import requests
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import json
 from datetime import datetime, timedelta
+import threading
+from flask import Flask
+
+# --- WEB SERVER FOR RENDER (Fixes Port Error) ---
+app = Flask(__name__)
+@app.route('/')
+def home(): return "V11 MONSTER Running"
+def run_web():
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+threading.Thread(target=run_web, daemon=True).start()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -24,36 +27,56 @@ PAIRS = {
     "USDJPY": "USDJPY=X",
     "XAUUSD": "GC=F",
 }
-CORR_GROUP = {"EURUSD": "USD", "GBPUSD": "USD", "XAUUSD": "USD", "USDJPY": "JPY"}
+
+# --- MONSTER STATE ---
+STATE_FILE = "monster_state.json"
+JOURNAL_FILE = "monster_journal.json"
+
+def load_state():
+    try:
+        with open(STATE_FILE, 'r') as f: return json.load(f)
+    except: return {"balance": 10.0, "consecutive_losses": 0, "consecutive_wins": 0, "total_trades": 0, "wins": 0, "losses": 0, "mode": "AGGRESSIVE"}
+
+def save_state(s):
+    try:
+        with open(STATE_FILE, 'w') as f: json.dump(s, f)
+    except: pass
+
+def log_journal(entry):
+    try:
+        data = []
+        try:
+            with open(JOURNAL_FILE, 'r') as f: data = json.load(f)
+        except: pass
+        data.append(entry)
+        with open(JOURNAL_FILE, 'w') as f: json.dump(data, f)
+    except: pass
 
 def now_eat():
     return datetime.now() + timedelta(hours=3)
 
-def in_session():
+def in_killzone():
     now = now_eat()
-    if now.weekday() >= 5:
-        return False
-    return 9 <= now.hour < 22  # AGGRESSIVE: 09:00-22:00
+    if now.weekday() >= 5: return False, "WEEKEND"
+    h = now.hour + now.minute/60
+    # London: 10:00-12:00 EAT, New York: 15:00-18:00 EAT
+    if 10 <= h < 12: return True, "LONDON"
+    if 15 <= h < 18: return True, "NEW YORK"
+    return False, "OUTSIDE KILLZONE"
 
 def in_news_block():
     now = now_eat()
-    if now.weekday() in [2, 4]:
-        if 15 <= now.hour < 17:
-            return True
-    if now.weekday() == 1 and 15 <= now.hour < 16:
-        return True
+    # High impact guess + real block: NFP first Friday, CPI Wed
+    if now.weekday() == 4 and 15 <= now.hour < 17: return True  # Fri NFP window
+    if now.weekday() == 2 and 15 <= now.hour < 16: return True  # Wed CPI window
     return False
 
 def send_msg(msg):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        try:
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                          json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
-        except Exception as e:
-            print(f"TG error: {e}")
+        try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
+        except Exception as e: print(f"TG error: {e}")
     if DISCORD_WEBHOOK:
-        try:
-            requests.post(DISCORD_WEBHOOK, json={"content": msg}, timeout=10)
+        try: requests.post(DISCORD_WEBHOOK, json={"content": msg}, timeout=10)
         except: pass
 
 def calc_ema(df, span):
@@ -96,59 +119,87 @@ def check_bos_fvg(df):
         if highs.iloc[i] < lows.iloc[i+2]: fvg_bear = True
     return bos_up, bos_down, fvg_bull, fvg_bear
 
-def get_signal(name, ticker):
-    try:
-        df15 = yf.download(ticker, period="5d", interval="15m", progress=False, auto_adjust=False)
-        if df15 is None or len(df15) < 210: return None
-        if isinstance(df15.columns, pd.MultiIndex): df15.columns = df15.columns.get_level_values(0)
-        df15 = df15.dropna()
-        df1h = yf.download(ticker, period="10d", interval="1h", progress=False, auto_adjust=False)
-        if df1h is not None and len(df1h) > 210:
-            if isinstance(df1h.columns, pd.MultiIndex): df1h.columns = df1h.columns.get_level_values(0)
-            df1h = df1h.dropna()
-            ema200_1h = calc_ema(df1h, 200); ema50_1h = calc_ema(df1h, 50)
-        else: ema200_1h = ema50_1h = None
+def get_data(ticker, period, interval):
+    df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=False)
+    if df is None or len(df) < 210: return None
+    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+    return df.dropna()
 
-        price = float(df15['Close'].iloc[-1])
-        ema50 = calc_ema(df15, 50); ema200 = calc_ema(df15, 200)
-        rsi = calc_rsi(df15['Close']); atr = calc_atr(df15); adx = calc_adx(df15)
-        bos_up, bos_down, fvg_bull, fvg_bear = check_bos_fvg(df15)
+def get_signal(name, ticker, state):
+    # --- ADAPTIVE RISK ---
+    if state["consecutive_losses"] >= 2:
+        risk_pct = 0.02  # Scared mode
+        risk_label = "🛡️ PROTECT 2%"
+    elif state["consecutive_wins"] >= 2:
+        risk_pct = 0.06  # Confident mode
+        risk_label = "🔥 CONFIDENT 6%"
+    else:
+        risk_pct = 0.05
+        risk_label = "⚡ AGGRESSIVE 5%"
 
-        signal = None
-        if price > ema50 > ema200 and 42 < rsi < 70: signal = "BUY"
-        elif price < ema50 < ema200 and 30 < rsi < 58: signal = "SELL"
-        if not signal: return None
+    if state["balance"] <= 7.0:
+        risk_pct = 0.01
+        risk_label = "🚨 SAFE MODE 1% - Balance Low"
 
-        # AGGRESSIVE FILTERS - looser
-        if adx < 15:  # was 20, now 15 = more trades
-            print(f"{name} blocked ADX {adx:.1f}")
-            return None
-        if ema50_1h is not None:
-            if signal == "BUY" and not (price > ema50_1h):
-                return None
-            if signal == "SELL" and not (price < ema50_1h):
-                return None
-        # BOS OR FVG is enough in aggressive (was BOS required)
-        if signal == "BUY" and not (bos_up or fvg_bull): return None
-        if signal == "SELL" and not (bos_down or fvg_bear): return None
+    df15 = get_data(ticker, "5d", "15m")
+    df1h = get_data(ticker, "10d", "1h")
+    df4h = get_data(ticker, "1mo", "4h")
+    if df15 is None or df1h is None or df4h is None: return None
 
-        has_fvg = (fvg_bull if signal == "BUY" else fvg_bear)
-        quality = "🔥 AGGRESSIVE A+ (BOS + FVG)" if has_fvg else "⚡ AGGRESSIVE A (BOS/FVG)"
+    price = float(df15['Close'].iloc[-1])
 
-        # AGGRESSIVE TP = 1.5R for faster wins
-        if signal == "BUY":
-            sl_price = price - atr; tp_price = price + atr * 1.5
-        else:
-            sl_price = price + atr; tp_price = price - atr * 1.5
+    # --- 4H TREND BOSS ---
+    ema50_4h = calc_ema(df4h, 50); ema200_4h = calc_ema(df4h, 200)
+    trend_4h = "BULLISH" if price > ema50_4h > ema200_4h else "BEARISH" if price < ema50_4h < ema200_4h else "RANGE"
+    if trend_4h == "RANGE": return None
 
-        return {"pair": name, "signal": signal, "price": price, "sl": sl_price, "tp": tp_price, "rsi": rsi, "atr": atr, "adx": adx, "quality": quality, "fvg": has_fvg}
-    except Exception as e:
-        print(f"Error {name}: {e}")
-        return None
+    # --- 1H STRUCTURE BOSS ---
+    ema50_1h = calc_ema(df1h, 50)
+    bos_up_1h, bos_down_1h, _, _ = check_bos_fvg(df1h)
+
+    # --- 15M ENTRY BOSS ---
+    ema50_15 = calc_ema(df15, 50); ema200_15 = calc_ema(df15, 200)
+    rsi = calc_rsi(df15['Close']); atr = calc_atr(df15); adx = calc_adx(df15)
+    bos_up, bos_down, fvg_bull, fvg_bear = check_bos_fvg(df15)
+
+    signal = None
+    reason = ""
+    confidence = 0
+
+    # BULLISH MONSTER SETUP - All 3 must agree
+    if trend_4h == "BULLISH" and price > ema50_1h and bos_up_1h:
+        if price > ema50_15 > ema200_15 and 42 < rsi < 70 and (bos_up or fvg_bull):
+            signal = "BUY"
+            confidence = 85 + (10 if fvg_bull and bos_up else 0)
+            reason = "4H Bull + 1H BOS + 15m FVG/BOS"
+
+    # BEARISH MONSTER SETUP
+    if trend_4h == "BEARISH" and price < ema50_1h and bos_down_1h:
+        if price < ema50_15 < ema200_15 and 30 < rsi < 58 and (bos_down or fvg_bear):
+            signal = "SELL"
+            confidence = 85 + (10 if fvg_bear and bos_down else 0)
+            reason = "4H Bear + 1H BOS + 15m FVG/BOS"
+
+    if not signal: return None
+    if adx < 18: return None  # Monster needs strength
+
+    risk_amt = state["balance"] * risk_pct
+    reward_amt = risk_amt * 2  # 2R
+
+    if signal == "BUY":
+        sl_price = price - atr; tp_price = price + atr * 2
+    else:
+        sl_price = price + atr; tp_price = price - atr * 2
+
+    return {"pair": name, "signal": signal, "price": price, "sl": sl_price, "tp": tp_price,
+            "rsi": rsi, "adx": adx, "trend_4h": trend_4h, "confidence": min(confidence, 95),
+            "reason": reason, "risk_pct": risk_pct, "risk_label": risk_label,
+            "risk_amt": risk_amt, "reward_amt": reward_amt}
 
 def main():
-    print("V10 AGGRESSIVE Started")
-    send_msg("🔥 *V10 AGGRESSIVE is LIVE*\n\nRisk: *5% per trade*\nTP: *1.5R* (faster wins)\nSession: *09:00-22:00 EAT*\nMax: *3 trades/day*\n\n⚠️ STOP RULE: If balance hits $7, STOP and tell me.\nLot: *0.01 ONLY* | No revenge trades")
+    print("V11 MONSTER Started")
+    state = load_state()
+    send_msg(f"👹 *V11 MONSTER IS LIVE*\n\nKillzones: *London 10-12 | NY 15-18 EAT*\nBrain: *4H + 1H + 15m must agree*\nRisk: *Adaptive 2% - 6%*\nBalance tracked: *${state['balance']:.2f}*\nWins: {state['wins']} | Losses: {state['losses']}\n\nI only trade when big money trades. No more chop.")
     last_signals = {}
     sent_today = {}
     while True:
@@ -156,36 +207,37 @@ def main():
             now = now_eat()
             day_key = now.strftime("%Y-%m-%d")
             if day_key not in sent_today: sent_today[day_key] = []
-            if len(sent_today[day_key]) >= 3:
-                print("Max 3 trades today reached")
+            if len(sent_today[day_key]) >= 2:
                 time.sleep(600); continue
+            in_kz, kz_name = in_killzone()
+            if not in_kz:
+                time.sleep(120); continue
             if in_news_block():
                 time.sleep(300); continue
-            if not in_session():
-                time.sleep(60); continue
             for name, ticker in PAIRS.items():
-                res = get_signal(name, ticker)
+                res = get_signal(name, ticker, state)
                 if not res: continue
                 if last_signals.get(name) == res["signal"]: continue
                 last_signals[name] = res["signal"]
                 sent_today[day_key].append(name)
-                fvg_text = "✅ FVG" if res["fvg"] else "BOS only"
+                log_journal({"time": now.isoformat(), "pair": name, "signal": res["signal"], "price": res["price"], "confidence": res["confidence"], "reason": res["reason"]})
                 msg = (
-                    f"🔥 *V10 AGGRESSIVE SIGNAL {len(sent_today[day_key])}/3*\n"
+                    f"👹 *V11 MONSTER SIGNAL {len(sent_today[day_key])}/2*\n"
                     f"━━━━━━━━━━━━━━\n"
-                    f"*Pair:* {res['pair']}\n"
-                    f"*Signal:* {res['signal']} {'🟢' if res['signal']=='BUY' else '🔴'}\n"
-                    f"*Quality:* {res['quality']}\n"
+                    f"*Pair:* {res['pair']} | *{res['signal']}* {'🟢' if res['signal']=='BUY' else '🔴'}\n"
+                    f"*Confidence:* {res['confidence']}% | *Killzone:* {kz_name}\n"
+                    f"*Why:* {res['reason']}\n"
+                    f"*4H Trend:* {res['trend_4h']}\n"
+                    f"━━━━━━━━━━━━━━\n"
                     f"*Entry:* `{res['price']:.5f}`\n"
-                    f"*Stop Loss:* `{res['sl']:.5f}`\n"
-                    f"*Take Profit:* `{res['tp']:.5f}` (1.5R)\n"
+                    f"*SL:* `{res['sl']:.5f}`\n"
+                    f"*TP:* `{res['tp']:.5f}` (2R)\n"
                     f"━━━━━━━━━━━━━━\n"
                     f"*RSI:* {res['rsi']:.1f} | *ADX:* {res['adx']:.1f}\n"
-                    f"*FVG:* {fvg_text}\n"
-                    f"━━━━━━━━━━━━━━\n"
-                    f"*LOT: 0.01 ONLY* | Risk $0.50 | Win $0.75\n"
+                    f"*{res['risk_label']}* | Risk ${res['risk_amt']:.2f} | Win ${res['reward_amt']:.2f}\n"
+                    f"*LOT: 0.01 ONLY*\n"
                     f"⏰ {now.strftime('%H:%M')} EAT\n"
-                    f"⚠️ Trade {len(sent_today[day_key])}/3 today - NO MORE AFTER THIS IF 3"
+                    f"⚠️ After you trade, tell me WIN or LOSS so I adapt"
                 )
                 send_msg(msg)
                 print(f"Sent {name} {res['signal']}")
