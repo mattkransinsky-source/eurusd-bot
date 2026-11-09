@@ -7,7 +7,6 @@ import json
 from datetime import datetime, date
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# --- SETTINGS ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DERIV_TOKEN = os.getenv("DERIV_TOKEN")
@@ -15,6 +14,9 @@ MIN_CONFIDENCE = 75
 MAX_TRADES_PER_DAY = 1
 HEARTBEAT_SECONDS = 7200
 STAKE = 1
+
+# USE BINARYWS - IT DOES NOT BLOCK RENDER LIKE DERIVWS DOES
+DERIV_URL = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
 
 trades_today = 0
 last_trade_date = None
@@ -24,7 +26,6 @@ deriv_balance = 0
 deriv_connected = False
 deriv_account = ""
 
-# --- RENDER PORT FIX ---
 def keep_render_alive():
     port = int(os.environ.get("PORT", 10000))
     class Handler(BaseHTTPRequestHandler):
@@ -55,18 +56,21 @@ def get_price():
     except:
         return None
 
-# --- DERIV: TEST ON STARTUP ---
+def get_ws():
+    import websocket
+    # Add browser headers so Cloudflare lets us in
+    return websocket.create_connection(DERIV_URL, timeout=15, header=["User-Agent: Mozilla/5.0", "Origin: https://deriv.com"])
+
 def test_deriv_on_startup():
     global deriv_connected, deriv_balance, deriv_account
     try:
         import websocket
     except:
-        print("Installing websocket-client...")
         os.system("pip install websocket-client -q")
         import websocket
     try:
-        print("=== TESTING DERIV CONNECTION NOW ===")
-        ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=15)
+        print("=== TESTING DERIV CONNECTION NOW (binaryws) ===")
+        ws = get_ws()
         ws.send(json.dumps({"authorize": DERIV_TOKEN}))
         auth = json.loads(ws.recv())
         if "error" in auth:
@@ -83,7 +87,7 @@ def test_deriv_on_startup():
         currency = bal.get("balance", {}).get("currency", "USD")
         is_demo = "VRTC" in deriv_account
         print(f"DERIV BALANCE: {deriv_balance} {currency} - {'DEMO ✅ SAFE' if is_demo else 'REAL ⚠️ STOP!'}")
-        send_telegram(f"✅ Deriv Connected!\nAccount: {deriv_account}\nBalance: {deriv_balance} {currency}\nType: {'DEMO ✅' if is_demo else 'REAL ⚠️'}\nBot will now watch for trades...")
+        send_telegram(f"✅ Deriv Connected!\nAccount: {deriv_account}\nBalance: {deriv_balance} {currency}\nType: {'DEMO ✅' if is_demo else 'REAL ⚠️'}")
         ws.close()
         return True
     except Exception as e:
@@ -91,11 +95,9 @@ def test_deriv_on_startup():
         send_telegram(f"❌ Deriv Startup Test Failed: {e}")
         return False
 
-# --- DERIV: PLACE TRADE ---
 def deriv_trade(signal, price):
     try:
-        import websocket
-        ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=15)
+        ws = get_ws()
         ws.send(json.dumps({"authorize": DERIV_TOKEN}))
         auth = json.loads(ws.recv())
         if "error" in auth:
@@ -134,7 +136,6 @@ def check_setup(price):
     recent = sum(price_history[-5:]) / 5
     older = sum(price_history[-10:-5]) / 5
     change = recent - older
-    # LOOSENED: was 0.0003, now 0.0001 so it can find setups in quiet market
     if abs(change) < 0.0001:
         return None, 0
     return ("BUY", 80) if change > 0 else ("SELL", 80)
@@ -142,21 +143,18 @@ def check_setup(price):
 async def heartbeat_loop():
     while True:
         await asyncio.sleep(HEARTBEAT_SECONDS)
-        send_telegram(f"💓 V7.0 Heartbeat - Still Alive\nTime: {datetime.now().strftime('%H:%M')}\nDeriv: {deriv_account} {'✅' if deriv_connected else '❌'}\nBalance: {deriv_balance}\nTrades Today: {trades_today}/{MAX_TRADES_PER_DAY}")
+        send_telegram(f"💓 V7.0 Heartbeat\nDeriv: {deriv_account} {'✅' if deriv_connected else '❌'}\nBalance: {deriv_balance}\nTrades Today: {trades_today}/{MAX_TRADES_PER_DAY}")
 
 async def main_loop():
     global trades_today, last_trade_date, last_signal
     if not DERIV_TOKEN:
-        print("❌ NO DERIV_TOKEN FOUND IN RENDER!")
+        print("❌ NO DERIV_TOKEN FOUND")
     else:
         print(f"DERIV_TOKEN found, length: {len(DERIV_TOKEN)} chars")
-        # TEST DERIV RIGHT NOW, DON'T WAIT FOR SIGNAL
         threading.Thread(target=test_deriv_on_startup, daemon=True).start()
         await asyncio.sleep(3)
-
-    send_telegram("V7.0 AUTO is LIVE - DERIV STARTUP TEST VERSION\nTesting Deriv login now...")
+    send_telegram("V7.0 AUTO is LIVE - DERIV BINARYWS FIX VERSION\nTesting Deriv login now...")
     asyncio.create_task(heartbeat_loop())
-
     while True:
         today = date.today()
         if last_trade_date != today:
