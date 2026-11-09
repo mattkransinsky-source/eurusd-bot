@@ -2,7 +2,7 @@ import os
 import asyncio
 import requests
 import threading
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # Accept BOTH token names so it never says False again
@@ -15,12 +15,14 @@ PAIRS = {
     "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X",
 }
-# Pip size for TP/SL calc
 PIP = {"EURUSD": 0.0001, "GBPUSD": 0.0001, "USDJPY": 0.01, "XAUUSD": 0.1}
 
-last_signals = {}  # pair -> last signal to avoid spam
+last_signals = {}
 signals_today = 0
 last_signal_date = None
+
+def now_eat():
+    return datetime.now() + timedelta(hours=3)
 
 def keep_alive():
     port = int(os.environ.get("PORT", 10000))
@@ -48,7 +50,6 @@ def send_telegram(msg):
         return 0
 
 def get_closes(symbol):
-    # Get 15m candles, last 5 days from Yahoo - no yfinance needed
     try:
         for base in ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]:
             url = f"{base}/v8/finance/chart/{symbol}?interval=15m&range=5d"
@@ -98,7 +99,6 @@ def check_pair(name, symbol):
     ema200 = calc_ema(closes, 200)
     rsi = calc_rsi(closes)
 
-    # --- IMPROVEMENT 1: STRONGER - ALL must agree ---
     trend_up = price > ema50 > ema200
     trend_down = price < ema50 < ema200
 
@@ -121,14 +121,14 @@ def check_pair(name, symbol):
 
 async def heartbeat():
     while True:
-        await asyncio.sleep(7200) # 2 hours
-        send_telegram(f"💓 V8 Heartbeat - Still Alive\nTime: {datetime.now().strftime('%H:%M')}\nPairs: EURUSD, XAUUSD, GBPUSD, USDJPY\nSignals Today: {signals_today}\nLast: {last_signals}")
+        await asyncio.sleep(7200)
+        send_telegram(f"💓 V8 Heartbeat - Still Alive\nTime: {now_eat().strftime('%H:%M')} EAT\nPairs: EURUSD, XAUUSD, GBPUSD, USDJPY\nSignals Today: {signals_today}\nLast: {last_signals}")
 
 async def main():
     global signals_today, last_signal_date
     print(f"TELEGRAM_TOKEN set: {bool(TELEGRAM_TOKEN)}")
     print(f"TELEGRAM_CHAT_ID: {TELEGRAM_CHAT_ID}")
-    send_telegram("✅ V8 is LIVE - IMPROVED\n\nPairs: EURUSD, XAUUSD, GBPUSD, USDJPY\nFilter: RSI + EMA50 + EMA200 - All must agree\nInfo: TP1 / TP2 / SL in every signal\nSignals Only - NO Auto Trading")
+    send_telegram("✅ V8 is LIVE - IMPROVED\n\nPairs: EURUSD, XAUUSD, GBPUSD, USDJPY\nFilter: RSI + EMA50 + EMA200 - All must agree\nInfo: TP1 / TP2 / SL in every signal\nTime: Kenya Time (EAT) FIXED\nSignals Only - NO Auto Trading")
     asyncio.create_task(heartbeat())
 
     while True:
@@ -142,7 +142,6 @@ async def main():
             try:
                 result = check_pair(name, symbol)
                 if result:
-                    # Avoid duplicate same signal for same pair
                     if last_signals.get(name) == result["signal"]:
                         print(f"{name} - Same signal {result['signal']} - skip")
                         continue
@@ -150,7 +149,6 @@ async def main():
                     signals_today += 1
                     price = result["price"]
                     pip = PIP[name]
-                    # --- IMPROVEMENT 3: BETTER INFO ---
                     if result["signal"] == "BUY":
                         sl = price - (20 * pip)
                         tp1 = price + (20 * pip)
@@ -171,7 +169,7 @@ async def main():
                         f"🎯 TP1: {tp1:.5f}\n"
                         f"🎯 TP2: {tp2:.5f}\n"
                         f"🛑 SL: {sl:.5f}\n\n"
-                        f"⏰ {datetime.now().strftime('%H:%M')} | Valid 30 mins\n"
+                        f"⏰ {now_eat().strftime('%H:%M')} EAT | Valid 30 mins\n"
                         f"⚠️ Signals only - YOU decide"
                     )
                     send_telegram(msg)
@@ -180,7 +178,7 @@ async def main():
                     print(f"{name} - No setup - waiting")
             except Exception as e:
                 print(f"Error {name}: {e}")
-        await asyncio.sleep(300) # Check every 5 mins
+        await asyncio.sleep(300)
 
 if __name__ == "__main__":
     asyncio.run(main())
