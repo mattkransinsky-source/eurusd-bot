@@ -5,7 +5,6 @@ import threading
 from datetime import datetime, date, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# Accept BOTH token names so it never says False again
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -16,13 +15,23 @@ PAIRS = {
     "USDJPY": "USDJPY=X",
 }
 PIP = {"EURUSD": 0.0001, "GBPUSD": 0.0001, "USDJPY": 0.01, "XAUUSD": 0.1}
+# IMPROVEMENT 1: Correlation groups - EURUSD, GBPUSD, XAUUSD move together
+CORR_GROUP = {"EURUSD": "USD", "GBPUSD": "USD", "XAUUSD": "USD", "USDJPY": "JPY"}
 
 last_signals = {}
 signals_today = 0
 last_signal_date = None
+sent_this_hour = {}  # hour_key -> list of (group, direction)
 
 def now_eat():
     return datetime.now() + timedelta(hours=3)
+
+# IMPROVEMENT 2: Session Filter - London + NY only
+def in_session():
+    now = now_eat()
+    if now.weekday() >= 5:  # Sat/Sun
+        return False
+    return 10 <= now.hour < 21  # 10:00 - 21:00 EAT, Mon-Fri
 
 def keep_alive():
     port = int(os.environ.get("PORT", 10000))
@@ -30,7 +39,7 @@ def keep_alive():
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b"V8 SIGNALS LIVE")
+            self.wfile.write(b"V9 SIGNALS LIVE")
         def log_message(self, *args):
             pass
     try:
@@ -49,21 +58,23 @@ def send_telegram(msg):
         print(f"Telegram failed: {e}")
         return 0
 
-def get_closes(symbol):
+def get_data(symbol):
     try:
         for base in ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]:
             url = f"{base}/v8/finance/chart/{symbol}?interval=15m&range=5d"
             r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
             if r.status_code == 200:
                 res = r.json()["chart"]["result"][0]
-                closes = res["indicators"]["quote"][0]["close"]
-                closes = [c for c in closes if c is not None]
+                q = res["indicators"]["quote"][0]
+                closes = [c for c in q["close"] if c is not None]
+                highs = [c for c in q["high"] if c is not None]
+                lows = [c for c in q["low"] if c is not None]
                 if len(closes) >= 100:
-                    return closes
-        return None
+                    return closes, highs, lows
+        return None, None, None
     except Exception as e:
         print(f"Data error {symbol}: {e}")
-        return None
+        return None, None, None
 
 def calc_rsi(closes, period=14):
     if len(closes) < period + 2:
@@ -90,14 +101,24 @@ def calc_ema(closes, span):
         ema = price * k + ema * (1 - k)
     return ema
 
+def calc_atr(highs, lows, closes, period=14):
+    if len(highs) < period + 1:
+        return abs(closes[-1] * 0.001)
+    trs = []
+    for i in range(1, period + 1):
+        tr = max(highs[-i] - lows[-i], abs(highs[-i] - closes[-i-1]), abs(lows[-i] - closes[-i-1]))
+        trs.append(tr)
+    return sum(trs) / len(trs)
+
 def check_pair(name, symbol):
-    closes = get_closes(symbol)
+    closes, highs, lows = get_data(symbol)
     if not closes:
         return None
     price = closes[-1]
     ema50 = calc_ema(closes, 50)
     ema200 = calc_ema(closes, 200)
     rsi = calc_rsi(closes)
+    atr = calc_atr(highs, lows, closes)
 
     trend_up = price > ema50 > ema200
     trend_down = price < ema50 < ema200
@@ -117,18 +138,18 @@ def check_pair(name, symbol):
 
     if not signal:
         return None
-    return {"pair": name, "signal": signal, "price": price, "rsi": rsi, "ema50": ema50, "ema200": ema200, "score": score}
+    return {"pair": name, "signal": signal, "price": price, "rsi": rsi, "ema50": ema50, "ema200": ema200, "score": score, "atr": atr}
 
 async def heartbeat():
     while True:
         await asyncio.sleep(7200)
-        send_telegram(f"💓 V8 Heartbeat - Still Alive\nTime: {now_eat().strftime('%H:%M')} EAT\nPairs: EURUSD, XAUUSD, GBPUSD, USDJPY\nSignals Today: {signals_today}\nLast: {last_signals}")
+        send_telegram(f"💓 V9 Heartbeat - Still Alive\nTime: {now_eat().strftime('%H:%M')} EAT\nSession: 10:00-21:00 EAT Only\nSignals Today: {signals_today}\nLast: {last_signals}")
 
 async def main():
     global signals_today, last_signal_date
     print(f"TELEGRAM_TOKEN set: {bool(TELEGRAM_TOKEN)}")
     print(f"TELEGRAM_CHAT_ID: {TELEGRAM_CHAT_ID}")
-    send_telegram("✅ V8 is LIVE - IMPROVED\n\nPairs: EURUSD, XAUUSD, GBPUSD, USDJPY\nFilter: RSI + EMA50 + EMA200 - All must agree\nInfo: TP1 / TP2 / SL in every signal\nTime: Kenya Time (EAT) FIXED\nSignals Only - NO Auto Trading")
+    send_telegram("✅ V9 is LIVE - SMARTER\n\nPairs: EURUSD, XAUUSD, GBPUSD, USDJPY\nNEW 1: Correlation Block - No double EURUSD+GBPUSD\nNEW 2: Session Filter - 10:00-21:00 EAT Only\nNEW 3: Smart ATR TP/SL - Adapts to volatility\nFilter: RSI + EMA50 + EMA200\nSignals Only - NO Auto Trading")
     asyncio.create_task(heartbeat())
 
     while True:
@@ -137,6 +158,17 @@ async def main():
             signals_today = 0
             last_signal_date = today
             last_signals.clear()
+            sent_this_hour.clear()
+
+        # Session filter - don't check outside session, just wait
+        if not in_session():
+            print(f"Outside session {now_eat().strftime('%H:%M')} EAT - sleeping")
+            await asyncio.sleep(300)
+            continue
+
+        hour_key = now_eat().strftime("%Y-%m-%d-%H")
+        if hour_key not in sent_this_hour:
+            sent_this_hour[hour_key] = []
 
         for name, symbol in PAIRS.items():
             try:
@@ -145,35 +177,54 @@ async def main():
                     if last_signals.get(name) == result["signal"]:
                         print(f"{name} - Same signal {result['signal']} - skip")
                         continue
+
+                    # IMPROVEMENT 1: Correlation Block
+                    group = CORR_GROUP[name]
+                    blocked = False
+                    for (g, d) in sent_this_hour[hour_key]:
+                        if g == group and d == result["signal"]:
+                            print(f"{name} - BLOCKED by correlation: {g} already sent {d} this hour")
+                            blocked = True
+                            break
+                    if blocked:
+                        continue
+
                     last_signals[name] = result["signal"]
+                    sent_this_hour[hour_key].append((group, result["signal"]))
                     signals_today += 1
                     price = result["price"]
-                    pip = PIP[name]
+                    atr = result["atr"]
+
+                    # IMPROVEMENT 3: Smart ATR TP/SL - TP 2x ATR, SL 1x ATR
                     if result["signal"] == "BUY":
-                        sl = price - (20 * pip)
-                        tp1 = price + (20 * pip)
-                        tp2 = price + (40 * pip)
+                        sl = price - (atr * 1.0)
+                        tp1 = price + (atr * 1.0)
+                        tp2 = price + (atr * 2.0)
                         emoji = "🟢"
                     else:
-                        sl = price + (20 * pip)
-                        tp1 = price - (20 * pip)
-                        tp2 = price - (40 * pip)
+                        sl = price + (atr * 1.0)
+                        tp1 = price - (atr * 1.0)
+                        tp2 = price - (atr * 2.0)
                         emoji = "🔴"
 
+                    # For display, show ATR in pips
+                    atr_pips = atr / PIP[name]
+
                     msg = (
-                        f"{emoji} V8 SIGNAL - {name} {result['signal']}\n\n"
+                        f"{emoji} V9 SIGNAL - {name} {result['signal']}\n\n"
                         f"Price: {price:.5f}\n"
                         f"Score: {result['score']}% | RSI: {result['rsi']:.1f}\n"
                         f"EMA50: {result['ema50']:.5f} | EMA200: {result['ema200']:.5f}\n"
-                        f"Trend: {'UP 📈' if result['signal']=='BUY' else 'DOWN 📉'}\n\n"
-                        f"🎯 TP1: {tp1:.5f}\n"
-                        f"🎯 TP2: {tp2:.5f}\n"
-                        f"🛑 SL: {sl:.5f}\n\n"
+                        f"Trend: {'UP 📈' if result['signal']=='BUY' else 'DOWN 📉'}\n"
+                        f"ATR: {atr_pips:.1f} pips\n\n"
+                        f"🎯 TP1: {tp1:.5f} (1x ATR)\n"
+                        f"🎯 TP2: {tp2:.5f} (2x ATR)\n"
+                        f"🛑 SL: {sl:.5f} (1x ATR)\n\n"
                         f"⏰ {now_eat().strftime('%H:%M')} EAT | Valid 30 mins\n"
                         f"⚠️ Signals only - YOU decide"
                     )
                     send_telegram(msg)
-                    print(f"SIGNAL SENT: {name} {result['signal']} at {price}")
+                    print(f"SIGNAL SENT: {name} {result['signal']} at {price} ATR {atr_pips:.1f} pips")
                 else:
                     print(f"{name} - No setup - waiting")
             except Exception as e:
