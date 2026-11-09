@@ -15,8 +15,18 @@ MAX_TRADES_PER_DAY = 1
 HEARTBEAT_SECONDS = 7200
 STAKE = 1
 
-# USE BINARYWS - IT DOES NOT BLOCK RENDER LIKE DERIVWS DOES
-DERIV_URL = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
+# KILL RENDER PROXY - THIS IS WHAT CAUSES 520
+for k in ["HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy","ALL_PROXY","all_proxy"]:
+    os.environ.pop(k, None)
+os.environ["NO_PROXY"] = "*"
+os.environ["no_proxy"] = "*"
+
+# TRY ALL 3 DERIV DOORS, ONE WILL OPEN
+DERIV_URLS = [
+    "wss://ws.binaryws.com/websockets/v3?app_id=1089",
+    "wss://ws.derivws.com/websockets/v3?app_id=1089",
+    "wss://ws.deriv.com/websockets/v3?app_id=1089",
+]
 
 trades_today = 0
 last_trade_date = None
@@ -46,6 +56,8 @@ def send_telegram(msg):
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=10)
         print(f"send status: {r.status_code} - {msg[:60]}")
+        if r.status_code == 404:
+            print("TELEGRAM 404: Bot blocked or Chat ID wrong. Open Telegram, send /start to your bot again, check TELEGRAM_CHAT_ID in Render")
     except Exception as e:
         print(f"Telegram failed: {e}")
 
@@ -58,8 +70,19 @@ def get_price():
 
 def get_ws():
     import websocket
-    # Add browser headers so Cloudflare lets us in
-    return websocket.create_connection(DERIV_URL, timeout=15, header=["User-Agent: Mozilla/5.0", "Origin: https://deriv.com"])
+    last_err = None
+    for url in DERIV_URLS:
+        try:
+            print(f"Trying Deriv URL: {url}")
+            # http_proxy_host=None = BYPASS RENDER PROXY
+            ws = websocket.create_connection(url, timeout=15, header=["User-Agent: Mozilla/5.0", "Origin: https://deriv.com"], http_proxy_host=None, http_proxy_port=None, http_no_proxy=["*"])
+            print(f"Connected to: {url}")
+            return ws
+        except Exception as e:
+            print(f"Failed {url}: {e}")
+            last_err = e
+            continue
+    raise last_err
 
 def test_deriv_on_startup():
     global deriv_connected, deriv_balance, deriv_account
@@ -69,7 +92,7 @@ def test_deriv_on_startup():
         os.system("pip install websocket-client -q")
         import websocket
     try:
-        print("=== TESTING DERIV CONNECTION NOW (binaryws) ===")
+        print("=== TESTING DERIV CONNECTION NOW (proxy-bypass) ===")
         ws = get_ws()
         ws.send(json.dumps({"authorize": DERIV_TOKEN}))
         auth = json.loads(ws.recv())
@@ -153,7 +176,7 @@ async def main_loop():
         print(f"DERIV_TOKEN found, length: {len(DERIV_TOKEN)} chars")
         threading.Thread(target=test_deriv_on_startup, daemon=True).start()
         await asyncio.sleep(3)
-    send_telegram("V7.0 AUTO is LIVE - DERIV BINARYWS FIX VERSION\nTesting Deriv login now...")
+    send_telegram("V7.0 AUTO is LIVE - DERIV PROXY-BYPASS VERSION")
     asyncio.create_task(heartbeat_loop())
     while True:
         today = date.today()
