@@ -1,40 +1,17 @@
 import os
-import time
 import asyncio
 import requests
 import threading
-import json
 from datetime import datetime, date
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-DERIV_TOKEN = os.getenv("DERIV_TOKEN")
-MIN_CONFIDENCE = 75
-MAX_TRADES_PER_DAY = 1
-HEARTBEAT_SECONDS = 7200
-STAKE = 1
 
-# KILL RENDER PROXY - THIS IS WHAT CAUSES 520
-for k in ["HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy","ALL_PROXY","all_proxy"]:
-    os.environ.pop(k, None)
-os.environ["NO_PROXY"] = "*"
-os.environ["no_proxy"] = "*"
-
-# TRY ALL 3 DERIV DOORS, ONE WILL OPEN
-DERIV_URLS = [
-    "wss://ws.binaryws.com/websockets/v3?app_id=1089",
-    "wss://ws.derivws.com/websockets/v3?app_id=1089",
-    "wss://ws.deriv.com/websockets/v3?app_id=1089",
-]
-
-trades_today = 0
-last_trade_date = None
-last_signal = None
 price_history = []
-deriv_balance = 0
-deriv_connected = False
-deriv_account = ""
+last_signal = None
+signals_today = 0
+last_signal_date = None
 
 def keep_render_alive():
     port = int(os.environ.get("PORT", 10000))
@@ -42,7 +19,7 @@ def keep_render_alive():
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b"V7.0 DERIV CONNECTED")
+            self.wfile.write(b"SIGNAL BOT LIVE")
         def log_message(self, *args):
             pass
     try:
@@ -57,99 +34,23 @@ def send_telegram(msg):
         r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=10)
         print(f"send status: {r.status_code} - {msg[:60]}")
         if r.status_code == 404:
-            print("TELEGRAM 404: Bot blocked or Chat ID wrong. Open Telegram, send /start to your bot again, check TELEGRAM_CHAT_ID in Render")
+            print("TELEGRAM 404: You blocked the bot or Chat ID is wrong. Unblock bot and check TELEGRAM_CHAT_ID")
+        if r.status_code == 400:
+            print(f"TELEGRAM 400: {r.text}")
+        return r.status_code
     except Exception as e:
         print(f"Telegram failed: {e}")
+        return 0
 
 def get_price():
     try:
         r = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         return float(r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"])
-    except:
+    except Exception as e:
+        print(f"Price failed: {e}")
         return None
 
-def get_ws():
-    import websocket
-    last_err = None
-    for url in DERIV_URLS:
-        try:
-            print(f"Trying Deriv URL: {url}")
-            # http_proxy_host=None = BYPASS RENDER PROXY
-            ws = websocket.create_connection(url, timeout=15, header=["User-Agent: Mozilla/5.0", "Origin: https://deriv.com"], http_proxy_host=None, http_proxy_port=None, http_no_proxy=["*"])
-            print(f"Connected to: {url}")
-            return ws
-        except Exception as e:
-            print(f"Failed {url}: {e}")
-            last_err = e
-            continue
-    raise last_err
-
-def test_deriv_on_startup():
-    global deriv_connected, deriv_balance, deriv_account
-    try:
-        import websocket
-    except:
-        os.system("pip install websocket-client -q")
-        import websocket
-    try:
-        print("=== TESTING DERIV CONNECTION NOW (proxy-bypass) ===")
-        ws = get_ws()
-        ws.send(json.dumps({"authorize": DERIV_TOKEN}))
-        auth = json.loads(ws.recv())
-        if "error" in auth:
-            print(f"DERIV AUTH FAILED: {auth['error']['message']}")
-            send_telegram(f"❌ Deriv Login FAILED: {auth['error']['message']}")
-            ws.close()
-            return False
-        deriv_account = auth['authorize']['loginid']
-        print(f"DERIV CONNECTED - Account: {deriv_account}")
-        deriv_connected = True
-        ws.send(json.dumps({"balance": 1}))
-        bal = json.loads(ws.recv())
-        deriv_balance = bal.get("balance", {}).get("balance", 0)
-        currency = bal.get("balance", {}).get("currency", "USD")
-        is_demo = "VRTC" in deriv_account
-        print(f"DERIV BALANCE: {deriv_balance} {currency} - {'DEMO ✅ SAFE' if is_demo else 'REAL ⚠️ STOP!'}")
-        send_telegram(f"✅ Deriv Connected!\nAccount: {deriv_account}\nBalance: {deriv_balance} {currency}\nType: {'DEMO ✅' if is_demo else 'REAL ⚠️'}")
-        ws.close()
-        return True
-    except Exception as e:
-        print(f"DERIV STARTUP TEST FAILED: {e}")
-        send_telegram(f"❌ Deriv Startup Test Failed: {e}")
-        return False
-
-def deriv_trade(signal, price):
-    try:
-        ws = get_ws()
-        ws.send(json.dumps({"authorize": DERIV_TOKEN}))
-        auth = json.loads(ws.recv())
-        if "error" in auth:
-            print(f"DERIV AUTH FAILED ON TRADE: {auth['error']['message']}")
-            return False
-        contract = "CALL" if signal == "BUY" else "PUT"
-        ws.send(json.dumps({"proposal": 1, "amount": STAKE, "basis": "stake", "contract_type": contract, "currency": "USD", "duration": 5, "duration_unit": "m", "symbol": "frxEURUSD"}))
-        prop = json.loads(ws.recv())
-        if "error" in prop:
-            print(f"DERIV PROPOSAL FAILED: {prop['error']['message']}")
-            ws.close()
-            return False
-        proposal_id = prop["proposal"]["id"]
-        print(f"Deriv Proposal OK: {contract} ${STAKE} id={proposal_id}")
-        ws.send(json.dumps({"buy": proposal_id, "price": STAKE}))
-        buy = json.loads(ws.recv())
-        if "error" in buy:
-            print(f"DERIV BUY FAILED: {buy['error']['message']}")
-            ws.close()
-            return False
-        print(f"DERIV TRADE PLACED! Contract: {buy['buy']['contract_id']}")
-        send_telegram(f"🎯 DERIV TRADE PLACED - DEMO\nSignal: {signal} ({contract})\nPair: EURUSD\nPrice: {price}\nStake: ${STAKE}\nContract ID: {buy['buy']['contract_id']}\nDuration: 5 min")
-        ws.close()
-        return True
-    except Exception as e:
-        print(f"DERIV TRADE ERROR: {e}")
-        return False
-
-def check_setup(price):
+def check_signal(price):
     global price_history
     price_history.append(price)
     if len(price_history) > 50:
@@ -159,45 +60,54 @@ def check_setup(price):
     recent = sum(price_history[-5:]) / 5
     older = sum(price_history[-10:-5]) / 5
     change = recent - older
+    # Quiet market = need only 0.0001 move
     if abs(change) < 0.0001:
         return None, 0
     return ("BUY", 80) if change > 0 else ("SELL", 80)
 
-async def heartbeat_loop():
+async def heartbeat():
     while True:
-        await asyncio.sleep(HEARTBEAT_SECONDS)
-        send_telegram(f"💓 V7.0 Heartbeat\nDeriv: {deriv_account} {'✅' if deriv_connected else '❌'}\nBalance: {deriv_balance}\nTrades Today: {trades_today}/{MAX_TRADES_PER_DAY}")
+        await asyncio.sleep(7200) # every 2 hours
+        send_telegram(f"💓 Signal Bot Still Alive\nTime: {datetime.now().strftime('%H:%M')}\nSignals Today: {signals_today}\nLast Signal: {last_signal}")
 
-async def main_loop():
-    global trades_today, last_trade_date, last_signal
-    if not DERIV_TOKEN:
-        print("❌ NO DERIV_TOKEN FOUND")
-    else:
-        print(f"DERIV_TOKEN found, length: {len(DERIV_TOKEN)} chars")
-        threading.Thread(target=test_deriv_on_startup, daemon=True).start()
-        await asyncio.sleep(3)
-    send_telegram("V7.0 AUTO is LIVE - DERIV PROXY-BYPASS VERSION")
-    asyncio.create_task(heartbeat_loop())
+async def main():
+    global last_signal, signals_today, last_signal_date
+    print(f"TELEGRAM_TOKEN set: {bool(TELEGRAM_TOKEN)}")
+    print(f"TELEGRAM_CHAT_ID: {TELEGRAM_CHAT_ID}")
+    # TEST TELEGRAM RIGHT NOW
+    test = send_telegram("✅ Signal Bot is LIVE - Signals Only, NO Auto Trading\nYou will get BUY / SELL signals here.\nIf you see this, Telegram is FIXED.")
+    if test != 200:
+        print("TELEGRAM TEST FAILED - Fix Chat ID / Unblock bot")
+
+    asyncio.create_task(heartbeat())
     while True:
         today = date.today()
-        if last_trade_date != today:
-            trades_today = 0
-            last_trade_date = today
+        if last_signal_date != today:
+            signals_today = 0
+            last_signal_date = today
+            last_signal = None
+
         price = get_price()
         if price:
             print(f"EURUSD price: {price} - {datetime.now().strftime('%H:%M:%S')}")
-            signal, confidence = check_setup(price)
-            if signal and confidence >= MIN_CONFIDENCE and signal != last_signal:
-                if trades_today < MAX_TRADES_PER_DAY:
-                    last_signal = signal
-                    trades_today += 1
-                    print(f"SIGNAL FOUND: {signal} - Trying Deriv...")
-                    deriv_trade(signal, price)
+            signal, conf = check_signal(price)
+            if signal and signal != last_signal:
+                last_signal = signal
+                signals_today += 1
+                if signal == "BUY":
+                    tp = price + 0.0020
+                    sl = price - 0.0010
+                    emoji = "🟢"
                 else:
-                    print("Max trades reached")
+                    tp = price - 0.0020
+                    sl = price + 0.0010
+                    emoji = "🔴"
+                msg = f"{emoji} SIGNAL - EURUSD {signal}\n\nEntry: {price:.4f}\nTake Profit: {tp:.4f}\nStop Loss: {sl:.4f}\nConfidence: {conf}%\nTime: {datetime.now().strftime('%H:%M')}\n\n⚠️ Signals only - YOU decide to trade. Bot will NOT trade for you."
+                send_telegram(msg)
+                print(f"SIGNAL SENT: {signal} at {price}")
             else:
-                print(f"No setup - confidence {confidence}% - waiting")
+                print(f"No setup - waiting - last: {last_signal}")
         await asyncio.sleep(30)
 
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    asyncio.run(main())
