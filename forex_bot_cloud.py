@@ -1,235 +1,261 @@
 import os
-import asyncio
+import time
 import requests
-import threading
-from datetime import datetime, date, timedelta
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL")
 
 PAIRS = {
     "EURUSD": "EURUSD=X",
-    "XAUUSD": "GC=F",
     "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X",
+    "XAUUSD": "GC=F",
 }
-PIP = {"EURUSD": 0.0001, "GBPUSD": 0.0001, "USDJPY": 0.01, "XAUUSD": 0.1}
-# IMPROVEMENT 1: Correlation groups - EURUSD, GBPUSD, XAUUSD move together
 CORR_GROUP = {"EURUSD": "USD", "GBPUSD": "USD", "XAUUSD": "USD", "USDJPY": "JPY"}
-
-last_signals = {}
-signals_today = 0
-last_signal_date = None
-sent_this_hour = {}  # hour_key -> list of (group, direction)
+SYMBOLS = {v: k for k, v in PAIRS.items()}
 
 def now_eat():
     return datetime.now() + timedelta(hours=3)
 
-# IMPROVEMENT 2: Session Filter - London + NY only
 def in_session():
     now = now_eat()
     if now.weekday() >= 5:  # Sat/Sun
         return False
-    return 10 <= now.hour < 21  # 10:00 - 21:00 EAT, Mon-Fri
+    return 10 <= now.hour < 21
 
-def keep_alive():
-    port = int(os.environ.get("PORT", 10000))
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"V9 SIGNALS LIVE")
-        def log_message(self, *args):
-            pass
-    try:
-        HTTPServer(("0.0.0.0", port), Handler).serve_forever()
-    except Exception as e:
-        print(f"Web server failed: {e}")
-threading.Thread(target=keep_alive, daemon=True).start()
+# --- UPGRADE 3: NEWS FILTER ---
+def in_news_block():
+    now = now_eat()
+    # Block 15:15 - 16:30 EAT on Wed (CPI) and Fri (NFP) + Tue 15:30 US data
+    if now.weekday() in [2, 4]:  # Wed, Fri
+        if 15 <= now.hour < 17:
+            return True
+    if now.weekday() == 1 and 15 <= now.hour < 16:  # Tue US data
+        return True
+    return False
 
-def send_telegram(msg):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=10)
-        print(f"send status: {r.status_code} - {msg[:60]}")
-        return r.status_code
-    except Exception as e:
-        print(f"Telegram failed: {e}")
-        return 0
+def send_msg(msg):
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        try:
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                          json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
+        except Exception as e:
+            print(f"TG error: {e}")
+    if DISCORD_WEBHOOK:
+        try:
+            requests.post(DISCORD_WEBHOOK, json={"content": msg}, timeout=10)
+        except: pass
 
-def get_data(symbol):
-    try:
-        for base in ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]:
-            url = f"{base}/v8/finance/chart/{symbol}?interval=15m&range=5d"
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-            if r.status_code == 200:
-                res = r.json()["chart"]["result"][0]
-                q = res["indicators"]["quote"][0]
-                closes = [c for c in q["close"] if c is not None]
-                highs = [c for c in q["high"] if c is not None]
-                lows = [c for c in q["low"] if c is not None]
-                if len(closes) >= 100:
-                    return closes, highs, lows
-        return None, None, None
-    except Exception as e:
-        print(f"Data error {symbol}: {e}")
-        return None, None, None
+# --- INDICATORS ---
+def calc_ema(df, span):
+    return df['Close'].ewm(span=span, adjust=False).mean().iloc[-1]
 
 def calc_rsi(closes, period=14):
-    if len(closes) < period + 2:
-        return 50
-    gains = []
-    losses = []
-    for i in range(1, period + 1):
-        diff = closes[-i] - closes[-i-1]
-        if diff > 0:
-            gains.append(diff)
+    delta = closes.diff()
+    gain = delta.where(delta > 0, 0).rolling(period).mean()
+    loss = -delta.where(delta < 0, 0).rolling(period).mean()
+    rs = gain / (loss + 0.0000001)
+    return 100 - (100 / (1 + rs)).iloc[-1]
+
+def calc_atr(df, period=14):
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
+    ], axis=1).max(axis=1)
+    return tr.rolling(period).mean().iloc[-1]
+
+def calc_adx(df, period=14):
+    # True ADX - measures trend strength
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+    tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(period).mean()
+    up = high.diff()
+    down = -low.diff()
+    plus_dm = up.where((up > down) & (up > 0), 0)
+    minus_dm = down.where((down > up) & (down > 0), 0)
+    plus_di = 100 * (plus_dm.rolling(period).mean() / (atr + 0.0000001))
+    minus_di = 100 * (minus_dm.rolling(period).mean() / (atr + 0.0000001))
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di + 0.0000001))
+    return dx.rolling(period).mean().iloc[-1]
+
+# --- UPGRADE 2: BOS + FVG ---
+def check_bos_fvg(df):
+    # BOS: Last 2 candles broke last swing high/low (last 20 candles)
+    closes = df['Close']
+    highs = df['High']
+    lows = df['Low']
+    swing_high = highs.iloc[-21:-1].max()
+    swing_low = lows.iloc[-21:-1].min()
+    last_close = closes.iloc[-1]
+    prev_close = closes.iloc[-2]
+    bos_up = prev_close < swing_high and last_close > swing_high
+    bos_down = prev_close > swing_low and last_close < swing_low
+
+    # FVG: Gap between candle -3 low and candle -1 high (bullish) or vice versa
+    # Bullish FVG: Low[-3] > High[-1] means gap up
+    fvg_bull = lows.iloc[-3] > highs.iloc[-1]
+    fvg_bear = highs.iloc[-3] < lows.iloc[-1]
+    # Also check recent 5 candles for any FVG
+    for i in range(-6, -2):
+        if lows.iloc[i] > highs.iloc[i+2]:
+            fvg_bull = True
+        if highs.iloc[i] < lows.iloc[i+2]:
+            fvg_bear = True
+    return bos_up, bos_down, fvg_bull, fvg_bear, swing_high, swing_low
+
+def get_signal(name, ticker):
+    try:
+        # 15M data
+        df15 = yf.download(ticker, period="5d", interval="15m", progress=False, auto_adjust=False)
+        if df15 is None or len(df15) < 210:
+            return None
+        if isinstance(df15.columns, pd.MultiIndex):
+            df15.columns = df15.columns.get_level_values(0)
+        df15 = df15.dropna()
+        # 1H data for trend filter
+        df1h = yf.download(ticker, period="10d", interval="1h", progress=False, auto_adjust=False)
+        if df1h is not None and len(df1h) > 210:
+            if isinstance(df1h.columns, pd.MultiIndex):
+                df1h.columns = df1h.columns.get_level_values(0)
+            df1h = df1h.dropna()
+            ema200_1h = calc_ema(df1h, 200)
+            ema50_1h = calc_ema(df1h, 50)
         else:
-            losses.append(abs(diff))
-    avg_gain = sum(gains) / period if gains else 0
-    avg_loss = sum(losses) / period if losses else 0.00001
-    rs = avg_gain / (avg_loss + 0.0000001)
-    return 100 - (100 / (1 + rs))
+            ema200_1h = ema50_1h = None
 
-def calc_ema(closes, span):
-    if len(closes) < span:
-        return closes[-1]
-    k = 2 / (span + 1)
-    ema = closes[-span]
-    for price in closes[-span:]:
-        ema = price * k + ema * (1 - k)
-    return ema
+        price = float(df15['Close'].iloc[-1])
+        ema50 = calc_ema(df15, 50)
+        ema200 = calc_ema(df15, 200)
+        rsi = calc_rsi(df15['Close'])
+        atr = calc_atr(df15)
+        adx = calc_adx(df15)
+        bos_up, bos_down, fvg_bull, fvg_bear, sh, sl = check_bos_fvg(df15)
 
-def calc_atr(highs, lows, closes, period=14):
-    if len(highs) < period + 1:
-        return abs(closes[-1] * 0.001)
-    trs = []
-    for i in range(1, period + 1):
-        tr = max(highs[-i] - lows[-i], abs(highs[-i] - closes[-i-1]), abs(lows[-i] - closes[-i-1]))
-        trs.append(tr)
-    return sum(trs) / len(trs)
+        # Base 15M signal
+        signal = None
+        if price > ema50 > ema200 and 45 < rsi < 68:
+            signal = "BUY"
+        elif price < ema50 < ema200 and 32 < rsi < 55:
+            signal = "SELL"
+        if not signal:
+            return None
 
-def check_pair(name, symbol):
-    closes, highs, lows = get_data(symbol)
-    if not closes:
+        # --- UPGRADE 1: 1H + ADX FILTER ---
+        # Must have ADX > 20 = real trend, not chop
+        if adx < 20:
+            print(f"{name} blocked: ADX {adx:.1f} too low (chop)")
+            return None
+        # 1H must agree with 15M
+        if ema50_1h is not None:
+            if signal == "BUY" and not (price > ema50_1h > ema200_1h):
+                print(f"{name} blocked: 1H trend not BUY")
+                return None
+            if signal == "SELL" and not (price < ema50_1h < ema200_1h):
+                print(f"{name} blocked: 1H trend not SELL")
+                return None
+
+        # --- UPGRADE 2: BOS REQUIRED, FVG BONUS ---
+        if signal == "BUY" and not bos_up:
+            print(f"{name} blocked: No BOS up")
+            return None
+        if signal == "SELL" and not bos_down:
+            print(f"{name} blocked: No BOS down")
+            return None
+
+        has_fvg = (fvg_bull if signal == "BUY" else fvg_bear)
+        quality = "⭐⭐⭐ A+ (BOS + FVG)" if has_fvg else "⭐⭐ A (BOS only)"
+
+        # ATR TP/SL
+        if signal == "BUY":
+            sl_price = price - atr
+            tp_price = price + atr * 2
+        else:
+            sl_price = price + atr
+            tp_price = price - atr * 2
+
+        return {
+            "pair": name, "signal": signal, "price": price,
+            "sl": sl_price, "tp": tp_price, "rsi": rsi, "atr": atr,
+            "adx": adx, "quality": quality, "fvg": has_fvg
+        }
+    except Exception as e:
+        print(f"Error {name}: {e}")
         return None
-    price = closes[-1]
-    ema50 = calc_ema(closes, 50)
-    ema200 = calc_ema(closes, 200)
-    rsi = calc_rsi(closes)
-    atr = calc_atr(highs, lows, closes)
 
-    trend_up = price > ema50 > ema200
-    trend_down = price < ema50 < ema200
-
-    signal = None
-    score = 0
-    if trend_up and 45 < rsi < 68:
-        signal = "BUY"
-        score = 80
-        if 55 <= rsi <= 65:
-            score = 85
-    elif trend_down and 32 < rsi < 55:
-        signal = "SELL"
-        score = 80
-        if 35 <= rsi <= 45:
-            score = 85
-
-    if not signal:
-        return None
-    return {"pair": name, "signal": signal, "price": price, "rsi": rsi, "ema50": ema50, "ema200": ema200, "score": score, "atr": atr}
-
-async def heartbeat():
+def main():
+    print("V10 Manual Smarter Started")
+    send_msg("🚀 *V10 MANUAL SMARTER is LIVE*\n\nUpgrades:\n✅ 1H Trend + ADX > 20 filter\n✅ BOS Required + FVG Bonus\n✅ News Block (Wed/Fri 15:30 EAT)\n✅ Session 10:00-21:00 EAT\n✅ ATR TP/SL\n\nExpect 1-2 signals/day, but sharper.")
+    last_signals = {}
+    sent_this_hour = {}
     while True:
-        await asyncio.sleep(7200)
-        send_telegram(f"💓 V9 Heartbeat - Still Alive\nTime: {now_eat().strftime('%H:%M')} EAT\nSession: 10:00-21:00 EAT Only\nSignals Today: {signals_today}\nLast: {last_signals}")
+        try:
+            now = now_eat()
+            hour_key = now.strftime("%Y-%m-%d-%H")
+            if hour_key not in sent_this_hour:
+                sent_this_hour[hour_key] = []
 
-async def main():
-    global signals_today, last_signal_date
-    print(f"TELEGRAM_TOKEN set: {bool(TELEGRAM_TOKEN)}")
-    print(f"TELEGRAM_CHAT_ID: {TELEGRAM_CHAT_ID}")
-    send_telegram("✅ V9 is LIVE - SMARTER\n\nPairs: EURUSD, XAUUSD, GBPUSD, USDJPY\nNEW 1: Correlation Block - No double EURUSD+GBPUSD\nNEW 2: Session Filter - 10:00-21:00 EAT Only\nNEW 3: Smart ATR TP/SL - Adapts to volatility\nFilter: RSI + EMA50 + EMA200\nSignals Only - NO Auto Trading")
-    asyncio.create_task(heartbeat())
+            if in_news_block():
+                print(f"News block - sleeping {now.strftime('%H:%M')}")
+                time.sleep(300)
+                continue
 
-    while True:
-        today = date.today()
-        if last_signal_date != today:
-            signals_today = 0
-            last_signal_date = today
-            last_signals.clear()
-            sent_this_hour.clear()
+            if not in_session():
+                time.sleep(60)
+                continue
 
-        # Session filter - don't check outside session, just wait
-        if not in_session():
-            print(f"Outside session {now_eat().strftime('%H:%M')} EAT - sleeping")
-            await asyncio.sleep(300)
-            continue
+            for name, ticker in PAIRS.items():
+                res = get_signal(name, ticker)
+                if not res:
+                    continue
+                if last_signals.get(name) == res["signal"]:
+                    continue
+                # Correlation Block
+                group = CORR_GROUP[name]
+                if any(g == group and d == res["signal"] for g, d in sent_this_hour[hour_key]):
+                    print(f"{name} blocked by correlation")
+                    continue
 
-        hour_key = now_eat().strftime("%Y-%m-%d-%H")
-        if hour_key not in sent_this_hour:
-            sent_this_hour[hour_key] = []
+                last_signals[name] = res["signal"]
+                sent_this_hour[hour_key].append((group, res["signal"]))
+                fvg_text = "✅ FVG Found" if res["fvg"] else "No FVG (BOS only)"
 
-        for name, symbol in PAIRS.items():
-            try:
-                result = check_pair(name, symbol)
-                if result:
-                    if last_signals.get(name) == result["signal"]:
-                        print(f"{name} - Same signal {result['signal']} - skip")
-                        continue
-
-                    # IMPROVEMENT 1: Correlation Block
-                    group = CORR_GROUP[name]
-                    blocked = False
-                    for (g, d) in sent_this_hour[hour_key]:
-                        if g == group and d == result["signal"]:
-                            print(f"{name} - BLOCKED by correlation: {g} already sent {d} this hour")
-                            blocked = True
-                            break
-                    if blocked:
-                        continue
-
-                    last_signals[name] = result["signal"]
-                    sent_this_hour[hour_key].append((group, result["signal"]))
-                    signals_today += 1
-                    price = result["price"]
-                    atr = result["atr"]
-
-                    # IMPROVEMENT 3: Smart ATR TP/SL - TP 2x ATR, SL 1x ATR
-                    if result["signal"] == "BUY":
-                        sl = price - (atr * 1.0)
-                        tp1 = price + (atr * 1.0)
-                        tp2 = price + (atr * 2.0)
-                        emoji = "🟢"
-                    else:
-                        sl = price + (atr * 1.0)
-                        tp1 = price - (atr * 1.0)
-                        tp2 = price - (atr * 2.0)
-                        emoji = "🔴"
-
-                    # For display, show ATR in pips
-                    atr_pips = atr / PIP[name]
-
-                    msg = (
-                        f"{emoji} V9 SIGNAL - {name} {result['signal']}\n\n"
-                        f"Price: {price:.5f}\n"
-                        f"Score: {result['score']}% | RSI: {result['rsi']:.1f}\n"
-                        f"EMA50: {result['ema50']:.5f} | EMA200: {result['ema200']:.5f}\n"
-                        f"Trend: {'UP 📈' if result['signal']=='BUY' else 'DOWN 📉'}\n"
-                        f"ATR: {atr_pips:.1f} pips\n\n"
-                        f"🎯 TP1: {tp1:.5f} (1x ATR)\n"
-                        f"🎯 TP2: {tp2:.5f} (2x ATR)\n"
-                        f"🛑 SL: {sl:.5f} (1x ATR)\n\n"
-                        f"⏰ {now_eat().strftime('%H:%M')} EAT | Valid 30 mins\n"
-                        f"⚠️ Signals only - YOU decide"
-                    )
-                    send_telegram(msg)
-                    print(f"SIGNAL SENT: {name} {result['signal']} at {price} ATR {atr_pips:.1f} pips")
-                else:
-                    print(f"{name} - No setup - waiting")
-            except Exception as e:
-                print(f"Error {name}: {e}")
-        await asyncio.sleep(300)
+                msg = (
+                    f"🚨 *V10 SMARTER SIGNAL*\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"*Pair:* {res['pair']}\n"
+                    f"*Signal:* {res['signal']} {'🟢' if res['signal']=='BUY' else '🔴'}\n"
+                    f"*Quality:* {res['quality']}\n"
+                    f"*Entry:* `{res['price']:.5f}`\n"
+                    f"*Stop Loss:* `{res['sl']:.5f}`\n"
+                    f"*Take Profit:* `{res['tp']:.5f}`\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"*RSI:* {res['rsi']:.1f}\n"
+                    f"*ADX:* {res['adx']:.1f} (Trend Strength)\n"
+                    f"*ATR:* {res['atr']:.5f}\n"
+                    f"*FVG:* {fvg_text}\n"
+                    f"*BOS:* ✅ Confirmed\n"
+                    f"*1H Trend:* ✅ Agrees\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"⏰ {now.strftime('%H:%M')} EAT\n"
+                    f"⚠️ Valid 30 mins | 1% Risk | Manual Only"
+                )
+                send_msg(msg)
+                print(f"Sent {name} {res['signal']}")
+            time.sleep(300)  # 5 min loop
+        except Exception as e:
+            print(f"Main loop error: {e}")
+            time.sleep(60)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
