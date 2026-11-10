@@ -1,240 +1,236 @@
-# V11 MONSTER - FIXED PRICES - Flask + Hunter + Heartbeat
-import os
-import time
-import requests
-from datetime import datetime, timezone
-from threading import Thread
-from flask import Flask
+import os, time, requests, datetime, pytz
+from datetime import datetime as dt
+import MetaTrader5 as mt5
 
-# ========== CONFIG ==========
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+# ============ CONFIG ============
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY"]
+TIMEFRAME_4H = mt5.TIMEFRAME_H4
+TIMEFRAME_1H = mt5.TIMEFRAME_H1
+TIMEFRAME_15M = mt5.TIMEFRAME_M15
 
-PAIRS = {
-    "XAUUSD": "GC=F",      # Gold - 2 decimals
-    "EURUSD": "EURUSD=X",  # 5 decimals
-    "GBPUSD": "GBPUSD=X",  # 5 decimals
-    "USDJPY": "USDJPY=X",  # 3 decimals
-}
+# Killzones in Nairobi time (UTC+3)
+KILLZONES = [(10, 12), (15, 18)]  # London 10-12, NY 15-18
+MAGIC = 0
 
-# FIX: Correct decimals per pair - THIS WAS THE BUG
-DECIMALS = {
-    "XAUUSD": 2,
-    "EURUSD": 5,
-    "GBPUSD": 5,
-    "USDJPY": 3,
-}
-
-def fmt(pair, price):
-    d = DECIMALS.get(pair, 2)
-    return f"{price:.{d}f}"
-
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "V11 MONSTER IS LIVE 👹"
-
-@app.route("/health")
-def health():
-    return "OK"
-
-def send_msg(msg):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram not configured - skipping send")
-        return
+def send_telegram(msg):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=10)
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
     except Exception as e:
-        print(f"Telegram send error: {e}")
-
-def now_eat():
-    return datetime.now(timezone.utc).hour + 3, datetime.now(timezone.utc)
+        print("Telegram error:", e)
 
 def in_killzone():
-    hour_eat, _ = now_eat()
-    if hour_eat >= 24:
-        hour_eat -= 24
-    london = 10 <= hour_eat < 12
-    ny = 15 <= hour_eat < 18
-    return london or ny, hour_eat
+    tz = pytz.timezone("Africa/Nairobi")
+    now = dt.now(tz)
+    for start, end in KILLZONES:
+        if start <= now.hour < end:
+            return True, now
+    return False, now
 
-# ========== DATA ==========
-def get_price(ticker):
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=15m&range=5d"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=15)
-        data = r.json()
-        result = data["chart"]["result"][0]
-        closes = result["indicators"]["quote"][0]["close"]
-        closes = [c for c in closes if c is not None]
-        return closes
-    except Exception as e:
-        print(f"Fetch error {ticker}: {e}")
-        return []
+def get_rates(symbol, tf, n=250):
+    rates = mt5.copy_rates_from_pos(symbol, tf, 0, n)
+    return rates
 
-def calc_ema(prices, period):
-    if len(prices) < period:
-        return None
+def ema(values, period):
     k = 2 / (period + 1)
-    ema = prices[0]
-    for p in prices[1:]:
-        ema = p * k + ema * (1 - k)
-    return ema
+    ema_val = values[0]
+    for v in values[1:]:
+        ema_val = v * k + ema_val * (1 - k)
+    return ema_val
 
-def check_fvg_bull(prices):
-    if len(prices) < 5:
+def check_spread(symbol):
+    tick = mt5.symbol_info_tick(symbol)
+    info = mt5.symbol_info(symbol)
+    if not tick or not info:
         return False
-    return prices[-1] > prices[-3] and prices[-2] < prices[-3]
-
-def check_fvg_bear(prices):
-    if len(prices) < 5:
+    spread_points = (tick.ask - tick.bid) / info.point
+    # Sharper: skip high spread
+    if "XAU" in symbol and spread_points > 35:
         return False
-    return prices[-1] < prices[-3] and prices[-2] > prices[-3]
+    if "EUR" in symbol and spread_points > 20:
+        return False
+    if "GBP" in symbol and spread_points > 25:
+        return False
+    if "JPY" in symbol and spread_points > 25:
+        return False
+    return True
 
-def get_signal(name, ticker, state):
-    closes = get_price(ticker)
-    if len(closes) < 100:
-        print(f"{name}: Not enough data {len(closes)}")
+def analyze(symbol):
+    # --- Check spread first ---
+    if not check_spread(symbol):
+        print(f"{symbol}: Spread too high, skip")
         return None
 
-    ema_4h = calc_ema(closes, 100)
-    ema_1h = calc_ema(closes, 50)
-    price = closes[-1]
-
-    if ema_4h is None or ema_1h is None:
+    rates_4h = get_rates(symbol, TIMEFRAME_4H, 100)
+    rates_1h = get_rates(symbol, TIMEFRAME_1H, 100)
+    rates_15m = get_rates(symbol, TIMEFRAME_15M, 100)
+    if rates_4h is None or rates_1h is None or rates_15m is None:
         return None
 
-    trend_4h = "BULL" if price > ema_4h else "BEAR"
-    bos_1h = "BULL" if price > ema_1h else "BEAR"
-    fvg_bull = check_fvg_bull(closes)
-    fvg_bear = check_fvg_bear(closes)
+    closes_4h = [r['close'] for r in rates_4h]
+    closes_1h = [r['close'] for r in rates_1h]
+    closes_15m = [r['close'] for r in rates_15m]
 
-    signal = None
-    reason = ""
-    confidence = 0
+    # --- SHARPER RULE 3: EMA 50 + EMA 200 BOTH must agree ---
+    ema50_4h = ema(closes_4h, 50)
+    ema200_4h = ema(closes_4h, 200)
+    price_4h = closes_4h[-1]
 
-    if trend_4h == "BULL" and bos_1h == "BULL" and fvg_bull:
-        signal = "BUY"
-        confidence = 85
-        reason = "4H Bull + 1H BOS + 15m FVG/BOS"
-
-    if trend_4h == "BEAR" and bos_1h == "BEAR" and fvg_bear:
-        signal = "SELL"
-        confidence = 85
-        reason = "4H Bear + 1H BOS + 15m FVG/BOS"
-
-    if not signal:
-        return None
-
-    # ATR - use last 14 candles average range
-    ranges = [abs(closes[i] - closes[i-1]) for i in range(1, len(closes))]
-    atr = sum(ranges[-14:]) / 14 if len(ranges) >= 14 else price * 0.002
-    if atr == 0:
-        atr = price * 0.002
-
-    # For Forex, ensure ATR is not too tiny to disappear
-    # GBPUSD ATR should be ~0.001 - 0.003, so SL = 2x ATR is real
-    sl_dist = atr * 2
-    tp_dist = atr * 2
-
-    balance = state.get("balance", 100)
-    risk_amt = balance * 0.01
-    reward_amt = risk_amt * 2
-
-    if signal == "BUY":
-        sl_price = price - sl_dist
-        tp_price = price + tp_dist
+    trend = None
+    if price_4h > ema50_4h and price_4h > ema200_4h:
+        trend = "BUY"
+    elif price_4h < ema50_4h and price_4h < ema200_4h:
+        trend = "SELL"
     else:
-        sl_price = price + sl_dist
-        tp_price = price - tp_dist
+        print(f"{symbol}: Price between EMAs - chop zone, skip")
+        return None
+
+    # --- 1H BOS ---
+    # Simple BOS: last 1H close breaks previous 1H high/low
+    high_1h_prev = max([r['high'] for r in rates_1h[-20:-1]])
+    low_1h_prev = min([r['low'] for r in rates_1h[-20:-1]])
+    last_1h = rates_1h[-1]
+
+    bos_buy = last_1h['close'] > high_1h_prev
+    bos_sell = last_1h['close'] < low_1h_prev
+
+    if trend == "BUY" and not bos_buy:
+        return None
+    if trend == "SELL" and not bos_sell:
+        return None
+
+    # --- SHARPER RULE 2: Liquidity Sweep with Wick Rejection ---
+    # Look back 15m: sweep previous low/high then close back inside
+    prev_low_15m = min([r['low'] for r in rates_15m[-20:-2]])
+    prev_high_15m = max([r['high'] for r in rates_15m[-20:-2]])
+    last_15m = rates_15m[-1]
+    prev_15m = rates_15m[-2]
+
+    sweep_buy = False
+    sweep_sell = False
+
+    # For BUY: price wicked below prev low, then closed back above it
+    if trend == "BUY":
+        if prev_15m['low'] < prev_low_15m and prev_15m['close'] > prev_low_15m:
+            # Wick rejection: wick is at least 60% of candle
+            candle_range = prev_15m['high'] - prev_15m['low']
+            lower_wick = prev_15m['close'] - prev_15m['low']
+            if candle_range > 0 and lower_wick / candle_range > 0.6:
+                sweep_buy = True
+    if trend == "SELL":
+        if prev_15m['high'] > prev_high_15m and prev_15m['close'] < prev_high_15m:
+            candle_range = prev_15m['high'] - prev_15m['low']
+            upper_wick = prev_15m['high'] - prev_15m['close']
+            if candle_range > 0 and upper_wick / candle_range > 0.6:
+                sweep_sell = True
+
+    if trend == "BUY" and not sweep_buy:
+        print(f"{symbol}: No wick sweep for BUY, skip")
+        return None
+    if trend == "SELL" and not sweep_sell:
+        print(f"{symbol}: No wick sweep for SELL, skip")
+        return None
+
+    # --- SHARPER RULE 1: FVG + Retest ---
+    # Find FVG in last 10 candles of 15m, price must be retesting it NOW
+    fvg_found = False
+    fvg_top = fvg_bottom = 0
+    for i in range(len(rates_15m)-10, len(rates_15m)-2):
+        c1 = rates_15m[i]
+        c3 = rates_15m[i+2]
+        # Bullish FVG: c1 high < c3 low
+        if trend == "BUY" and c1['high'] < c3['low']:
+            fvg_bottom = c1['high']
+            fvg_top = c3['low']
+            fvg_found = True
+            break
+        # Bearish FVG: c1 low > c3 high
+        if trend == "SELL" and c1['low'] > c3['high']:
+            fvg_top = c1['low']
+            fvg_bottom = c3['high']
+            fvg_found = True
+            break
+
+    if not fvg_found:
+        return None
+
+    # Retest check: current price is inside FVG zone
+    current_price = last_15m['close']
+    if not (fvg_bottom <= current_price <= fvg_top or abs(current_price - fvg_bottom) < (fvg_top - fvg_bottom)*0.3):
+        print(f"{symbol}: Price not retesting FVG yet, waiting...")
+        return None
+
+    # --- Calculate Entry / SL / TP ---
+    entry = current_price
+    if trend == "BUY":
+        sl = prev_low_15m - (fvg_top - fvg_bottom)  # below sweep low
+        risk = entry - sl
+        tp = entry + risk * 2  # 1:2 RR
+    else:
+        sl = prev_high_15m + (fvg_top - fvg_bottom)
+        risk = sl - entry
+        tp = entry - risk * 2
+
+    if risk <= 0:
+        return None
 
     return {
-        "pair": name, "signal": signal, "price": price,
-        "sl": sl_price, "tp": tp_price,
-        "trend_4h": trend_4h,
-        "confidence": max(confidence, 55),
-        "reason": reason,
-        "risk_amt": risk_amt, "reward_amt": reward_amt,
-        "risk_label": "1% Risk",
+        "symbol": symbol,
+        "trend": trend,
+        "entry": round(entry, 5),
+        "sl": round(sl, 5),
+        "tp": round(tp, 5),
+        "rr": "1:2",
+        "fvg": f"{round(fvg_bottom,5)} - {round(fvg_top,5)}"
     }
 
-# ========== MAIN LOOP ==========
 def main():
-    print("V11 MONSTER Started - FIXED PRICES")
-    send_msg("👹 V11 MONSTER IS LIVE - FIXED PRICES\nKillzones: London 10-12 | NY 15-18 EAT\nRule: 4H + 1H + 15m must agree\nPrices now correct: GBPUSD 5 decimals, Gold 2 decimals")
-    sent_today = {}
-    last_signals = {}
-    state = {"balance": 100}
+    if not mt5.initialize():
+        print("MT5 init failed")
+        return
+    send_telegram("✅ *V13 SHARPER is LIVE*\nUnlimited signals, but ONLY A+ setups.\nEMA 50+200 + Wick Sweep + FVG Retest + Spread Filter")
+    print("V13 Started")
+
+    sent_today = set()  # to avoid duplicate signal for same candle
 
     while True:
-        try:
-            hour_eat, now_utc = now_eat()
-            if hour_eat >= 24:
-                hour_eat -= 24
-            day_key = now_utc.strftime("%Y-%m-%d")
-            if day_key not in sent_today:
-                sent_today[day_key] = []
+        ok, now = in_killzone()
+        if not ok:
+            print(f"Outside killzone {now}, sleeping 120s")
+            time.sleep(120)
+            continue
 
-            in_kz, _ = in_killzone()
-            print(f"V11 checking... EAT {hour_eat}:00 | in_killzone={in_kz} | sent_today={len(sent_today.get(day_key, []))} | {now_utc.strftime('%H:%M:%S')} UTC", flush=True)
+        for sym in SYMBOLS:
+            try:
+                mt5.symbol_select(sym, True)
+                result = analyze(sym)
+                if result:
+                    key = f"{sym}-{result['trend']}-{result['entry']}"
+                    if key in sent_today:
+                        continue
+                    sent_today.add(key)
+                    # NO MAX LIMIT - send whenever parameters align
+                    msg = (
+                        f"🔥 *V13 SHARPER SIGNAL*\n\n"
+                        f"Pair: {result['symbol']}\n"
+                        f"Direction: {result['trend']}\n"
+                        f"Entry: {result['entry']}\n"
+                        f"SL: {result['sl']}\n"
+                        f"TP: {result['tp']}\n"
+                        f"RR: {result['rr']}\n"
+                        f"FVG Zone: {result['fvg']}\n"
+                        f"Filters: EMA50+200 ✅ Wick Sweep ✅ Retest ✅ Spread ✅\n\n"
+                        f"Lot: 0.01 ONLY\n"
+                        f"Set SL + TP in MT5!"
+                    )
+                    send_telegram(msg)
+                    print(f"Signal sent {sym} {result['trend']}")
+            except Exception as e:
+                print(f"Error {sym}: {e}")
 
-            if not in_kz:
-                print("Outside killzone, sleeping 120s", flush=True)
-                time.sleep(120)
-                continue
-
-            if len(sent_today[day_key]) >= 2:
-                print("Max 2 signals reached today, sleeping 120s", flush=True)
-                time.sleep(120)
-                continue
-
-            for name, ticker in PAIRS.items():
-                res = get_signal(name, ticker, state)
-                if not res:
-                    print(f"{name}: No setup - 3 must agree, skipping", flush=True)
-                    continue
-
-                if last_signals.get(name) == res["signal"]:
-                    continue
-
-                last_signals[name] = res["signal"]
-                sent_today[day_key].append(res["signal"])
-
-                # FIXED FORMATTING HERE
-                msg = (
-                    f"👹 V11 MONSTER SIGNAL\n"
-                    f"Pair: {res['pair']} | {res['signal']} {'🟢' if res['signal']=='BUY' else '🔴'}\n"
-                    f"Confidence: {res['confidence']}%\n"
-                    f"Why: {res['reason']}\n"
-                    f"4H Trend: {res['trend_4h']}\n"
-                    f"Entry: {fmt(res['pair'], res['price'])}\n"
-                    f"SL: {fmt(res['pair'], res['sl'])}\n"
-                    f"TP: {fmt(res['pair'], res['tp'])}\n"
-                    f"Risk: {res['risk_label']} | Risk ${res['risk_amt']:.2f} | Win ${res['reward_amt']:.2f}\n"
-                    f"LOT: 0.01 ONLY\n"
-                    f"⏰ {now_utc.strftime('%H:%M')} UTC / {hour_eat}:00 EAT\n"
-                    f"⚠️ Enter within 2 mins of signal. If price moved away, SKIP.\n"
-                    f"⚠️ After you trade, tell me WIN or LOSS so I adapt"
-                )
-                send_msg(msg)
-                print(f"SIGNAL SENT {name} {res['signal']} Entry {fmt(name, res['price'])} SL {fmt(name, res['sl'])} TP {fmt(name, res['tp'])}", flush=True)
-                time.sleep(5)
-
-            print("Killzone scan done, sleeping 60s", flush=True)
-            time.sleep(60)
-
-        except Exception as e:
-            print(f"Main loop error: {e}", flush=True)
-            time.sleep(60)
+        time.sleep(60)  # check every 60s
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    def run_flask():
-        app.run(host="0.0.0.0", port=port)
-    t = Thread(target=run_flask, daemon=True)
-    t.start()
-    print(f"Flask running on port {port}", flush=True)
     main()
