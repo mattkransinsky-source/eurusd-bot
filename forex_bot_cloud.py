@@ -12,8 +12,6 @@ def home():
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SYMBOLS = {"XAUUSD": "GC=F", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X"}
-KILLZONES = [(10, 12), (15, 18)]
-NEWS_BLOCK = []
 
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -21,18 +19,6 @@ def send_telegram(msg):
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
     except Exception as e:
         print("Telegram error:", e)
-
-def in_killzone():
-    tz = pytz.timezone("Africa/Nairobi")
-    now = dt.now(tz)
-    for nh, nm in NEWS_BLOCK:
-        news_time = now.replace(hour=nh, minute=nm, second=0, microsecond=0)
-        if abs((now - news_time).total_seconds()) < 1800:
-            return False, now
-    for s, e in KILLZONES:
-        if s <= now.hour < e:
-            return True, now
-    return False, now
 
 def ema(values, period):
     k = 2 / (period + 1)
@@ -193,12 +179,9 @@ def bot_loop():
     send_telegram("✅ *V14 SNIPER CLOUD is LIVE*\nScore 75+ ONLY\nEMA + BOS + Wick + 15m BOS + FVG Retest + OB + RSI\nUnlimited signals, only snipers.")
     sent = set()
     while True:
-        ok, now = in_killzone()
-        if not ok:
-            print(f"V14 checking... EAT {now} | in_killzone=False | Outside killzone, sleeping 120s")
-            time.sleep(120)
-            continue
-        print(f"V14 checking... EAT {now} | in_killzone=True")
+        tz = pytz.timezone("Africa/Nairobi")
+        now = dt.now(tz)
+        print(f"V14 checking... EAT {now} | Killzone REMOVED - checking 24/7")
         for name, ysym in SYMBOLS.items():
             try:
                 res = analyze(name, ysym)
