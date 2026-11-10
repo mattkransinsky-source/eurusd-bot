@@ -6,7 +6,7 @@ from flask import Flask
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "V14 SNIPER LIVE"
+    return "V14 SNIPER LIVE - 75+"
 
 # ============ CONFIG ============
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -172,7 +172,7 @@ def analyze(name, yahoo_sym):
         details.append(f"RSI {round(rsi_val,1)} ❌ +0")
 
     print(f"{name} {trend} Score: {score}/100")
-    if score < 85:
+    if score < 75:
         return None
 
     entry = current
@@ -190,15 +190,15 @@ def analyze(name, yahoo_sym):
     return {"symbol": name, "trend": trend, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp),5), "score": score, "details": details, "rsi": round(float(rsi_val),1)}
 
 def bot_loop():
-    send_telegram("✅ *V14 SNIPER CLOUD is LIVE*\nScore 85+ ONLY\nEMA + BOS + Wick + 15m BOS + FVG Retest + OB + RSI\nUnlimited signals, only snipers.")
+    send_telegram("✅ *V14 SNIPER CLOUD is LIVE*\nScore 75+ ONLY\nEMA + BOS + Wick + 15m BOS + FVG Retest + OB + RSI\nUnlimited signals, only snipers.")
     sent = set()
     while True:
         ok, now = in_killzone()
         if not ok:
-            print(f"V11 checking... EAT {now} | in_killzone=False | Outside killzone, sleeping 120s")
+            print(f"V14 checking... EAT {now} | in_killzone=False | Outside killzone, sleeping 120s")
             time.sleep(120)
             continue
-        print(f"V11 checking... EAT {now} | in_killzone=True")
+        print(f"V14 checking... EAT {now} | in_killzone=True")
         for name, ysym in SYMBOLS.items():
             try:
                 res = analyze(name, ysym)
@@ -210,7 +210,7 @@ def bot_loop():
                     msg = (f"🎯 *V14 SNIPER - Score {res['score']}/100*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\nRSI: {res['rsi']}\n\n" + "\n".join(res['details']) + "\n\nLot: 0.01 ONLY")
                     send_telegram(msg)
                 else:
-                    print(f"{name}: No setup - score <85 or filter fail, skipping")
+                    print(f"{name}: No setup - score <75 or filter fail, skipping")
             except Exception as e:
                 print(f"Error {name}: {e}")
         time.sleep(60)
