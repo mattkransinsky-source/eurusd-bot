@@ -2,12 +2,11 @@ import os, time, requests, threading, pytz, gc
 from datetime import datetime as dt
 import yfinance as yf
 from flask import Flask
-from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "V17 ALIVE - Bot is running", 200
+    return "V18 ALIVE - Bot is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -39,8 +38,8 @@ def watchdog():
         time.sleep(30)
         idle = time.time() - last_activity
         print(f"WATCHDOG check - idle {int(idle)}s")
-        if idle > 180:
-            print("WATCHDOG: Frozen for 180s, force restarting...")
+        if idle > 240:
+            print("WATCHDOG: Frozen for 240s, force restarting...")
             os._exit(1)
 
 def ema(values, period):
@@ -65,7 +64,7 @@ def rsi(values, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def get_data(yahoo_symbol, interval, period="2d"):
+def get_data(yahoo_symbol, interval, period="1d"):
     try:
         df = yf.download(yahoo_symbol, interval=interval, period=period, progress=False, auto_adjust=False, threads=False, timeout=20)
         if df.empty:
@@ -78,8 +77,8 @@ def get_data(yahoo_symbol, interval, period="2d"):
         return None
 
 def analyze(name, yahoo_sym):
-    df_1h = get_data(yahoo_sym, "60m", "2d")
-    df_15m = get_data(yahoo_sym, "15m", "2d")
+    df_1h = get_data(yahoo_sym, "60m", "1d")
+    df_15m = get_data(yahoo_sym, "15m", "1d")
     if df_1h is None or df_15m is None:
         return None
     if len(df_15m) < 50 or len(df_1h) < 50:
@@ -180,47 +179,34 @@ def analyze(name, yahoo_sym):
         return None
     return {"symbol": name, "trend": trend, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp),5), "score": score, "details": details, "rsi": round(float(rsi_val),1)}
 
-def analyze_with_timeout(name, ysym):
-    global last_activity
-    try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(analyze, name, ysym)
-            res = future.result(timeout=45)
-            last_activity = time.time()
-            return res
-    except Exception as e:
-        print(f"Timeout/Error {name} after 45s: {e}")
-        last_activity = time.time()
-        return None
-
 def bot_loop():
     global last_activity
-    send_telegram("✅ *V17 SNIPER CLOUD is LIVE*\nScore 75+ ONLY\nEMA + BOS + Wick + 15m BOS + FVG Retest + OB + RSI\nUnlimited signals, only snipers.")
+    send_telegram("✅ *V18 SNIPER CLOUD is LIVE*\nScore 75+ ONLY\nEMA + BOS + Wick + 15m BOS + FVG Retest + OB + RSI\nUnlimited signals, only snipers.")
     sent = set()
     while True:
         try:
             tz = pytz.timezone("Africa/Nairobi")
             now = dt.now(tz)
             last_activity = time.time()
-            print(f"V17 checking... EAT {now} | Killzone REMOVED - checking 24/7")
+            print(f"V18 checking... EAT {now} | Killzone REMOVED - checking 24/7")
             for name, ysym in SYMBOLS.items():
                 try:
                     print(f"Checking {name}...")
-                    res = analyze_with_timeout(name, ysym)
+                    res = analyze(name, ysym)
                     if res:
                         key = f"{name}-{res['trend']}-{res['entry']}"
                         if key in sent:
                             continue
                         sent.add(key)
-                        msg = (f"🎯 *V17 SNIPER - Score {res['score']}/100*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\nRSI: {res['rsi']}\n\n" + "\n".join(res['details']) + "\n\nLot: 0.01 ONLY")
+                        msg = (f"🎯 *V18 SNIPER - Score {res['score']}/100*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\nRSI: {res['rsi']}\n\n" + "\n".join(res['details']) + "\n\nLot: 0.01 ONLY")
                         send_telegram(msg)
                     else:
                         print(f"{name}: No setup - score <75 or filter fail, skipping")
                 except Exception as e:
                     print(f"Error {name}: {e}")
             gc.collect()
-            print("Sleeping 120s...")
-            time.sleep(120)
+            print("Sleeping 180s...")
+            time.sleep(180)
         except Exception as e:
             print(f"Bot loop crash, restarting in 10s: {e}")
             time.sleep(10)
@@ -229,5 +215,5 @@ if __name__ == "__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=run_web, daemon=True).start()
-    print("V17 - Bot loop is now MAIN thread, Flask is background")
+    print("V18 - Bot loop is now MAIN thread, Flask is background")
     bot_loop()
