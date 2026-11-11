@@ -4,13 +4,19 @@ import yfinance as yf
 from flask import Flask
 
 app = Flask(__name__)
+
 @app.route('/')
 def home():
     return "V18 ALIVE - Bot is running", 200
 
+@app.route('/health')
+def health():
+    return "OK", 200
+
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    print(f"Starting Flask on port {port}...", flush=True)
+    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -23,13 +29,13 @@ def send_telegram(msg):
     try:
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
     except Exception as e:
-        print("Telegram error:", e)
+        print("Telegram error:", e, flush=True)
 
 def heartbeat():
     global last_activity
     while True:
         last_activity = time.time()
-        print(f"HEARTBEAT alive - {dt.now(pytz.timezone('Africa/Nairobi'))}")
+        print(f"HEARTBEAT alive - {dt.now(pytz.timezone('Africa/Nairobi'))}", flush=True)
         time.sleep(30)
 
 def watchdog():
@@ -37,9 +43,9 @@ def watchdog():
     while True:
         time.sleep(30)
         idle = time.time() - last_activity
-        print(f"WATCHDOG check - idle {int(idle)}s")
+        print(f"WATCHDOG check - idle {int(idle)}s", flush=True)
         if idle > 240:
-            print("WATCHDOG: Frozen for 240s, force restarting...")
+            print("WATCHDOG: Frozen for 240s, force restarting...", flush=True)
             os._exit(1)
 
 def ema(values, period):
@@ -73,7 +79,7 @@ def get_data(yahoo_symbol, interval, period="1d"):
             df.columns = df.columns.get_level_values(0)
         return df
     except Exception as e:
-        print(f"yfinance error {yahoo_symbol} {interval}: {e}")
+        print(f"yfinance error {yahoo_symbol} {interval}: {e}", flush=True)
         return None
 
 def analyze(name, yahoo_sym):
@@ -163,7 +169,7 @@ def analyze(name, yahoo_sym):
         score += 10; details.append(f"RSI {round(rsi_val,1)} ✅ +10")
     else:
         details.append(f"RSI {round(rsi_val,1)} ❌ +0")
-    print(f"{name} {trend} Score: {score}/100")
+    print(f"{name} {trend} Score: {score}/100", flush=True)
     if score < 75:
         return None
     entry = current
@@ -188,10 +194,10 @@ def bot_loop():
             tz = pytz.timezone("Africa/Nairobi")
             now = dt.now(tz)
             last_activity = time.time()
-            print(f"V18 checking... EAT {now} | Killzone REMOVED - checking 24/7")
+            print(f"V18 checking... EAT {now} | Killzone REMOVED - checking 24/7", flush=True)
             for name, ysym in SYMBOLS.items():
                 try:
-                    print(f"Checking {name}...")
+                    print(f"Checking {name}...", flush=True)
                     res = analyze(name, ysym)
                     if res:
                         key = f"{name}-{res['trend']}-{res['entry']}"
@@ -201,19 +207,19 @@ def bot_loop():
                         msg = (f"🎯 *V18 SNIPER - Score {res['score']}/100*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\nRSI: {res['rsi']}\n\n" + "\n".join(res['details']) + "\n\nLot: 0.01 ONLY")
                         send_telegram(msg)
                     else:
-                        print(f"{name}: No setup - score <75 or filter fail, skipping")
+                        print(f"{name}: No setup - score <75 or filter fail, skipping", flush=True)
                 except Exception as e:
-                    print(f"Error {name}: {e}")
+                    print(f"Error {name}: {e}", flush=True)
             gc.collect()
-            print("Sleeping 180s...")
+            print("Sleeping 180s...", flush=True)
             time.sleep(180)
         except Exception as e:
-            print(f"Bot loop crash, restarting in 10s: {e}")
+            print(f"Bot loop crash, restarting in 10s: {e}", flush=True)
             time.sleep(10)
 
 if __name__ == "__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=run_web, daemon=True).start()
-    print("V18 - Bot loop is now MAIN thread, Flask is background")
+    print("V18 - Bot loop is now MAIN thread, Flask is background", flush=True)
     bot_loop()
