@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 @app.route('/', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def home():
-    return "V19 ALIVE - Bot is running", 200
+    return "V21 ALIVE - Bot is running", 200
 
 @app.route('/health', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def health():
@@ -15,15 +15,15 @@ def health():
 
 @app.route('/<path:path>', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def catch_all(path):
-    return "V19 ALIVE - Bot is running", 200
+    return "V21 ALIVE - Bot is running", 200
 
 @app.errorhandler(404)
 def not_found(e):
-    return "V19 ALIVE - Bot is running", 200
+    return "V21 ALIVE - Bot is running", 200
 
 @app.errorhandler(405)
 def method_not_allowed(e):
-    return "V19 ALIVE - Bot is running", 200
+    return "V21 ALIVE - Bot is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -32,7 +32,7 @@ def run_web():
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-# V19 - 8 PAIRS = MORE SIGNALS, SAME 75+ QUALITY
+# V21 - 8 PAIRS, SCORE 75+ ONLY, UNLIMITED
 SYMBOLS = {
     "XAUUSD": "GC=F",
     "EURUSD": "EURUSD=X",
@@ -209,25 +209,14 @@ def analyze(name, yahoo_sym):
 
 def bot_loop():
     global last_activity
-    send_telegram("✅ *V19 SNIPER CLOUD is LIVE*\n8 Pairs | Score 75+ ONLY\nEMA + BOS + Wick + 15m BOS + FVG Retest + OB + RSI\nMax 4 trades/day | Move SL to BE at +20 pips\nUnlimited scanning, only snipers.")
+    send_telegram("✅ *V21 SNIPER CLOUD is LIVE*\n8 Pairs | Score 75+ ONLY | UNLIMITED Snipers\nEMA + BOS + Wick + 15m BOS + FVG Retest + OB + RSI\nNo daily cap - Only 75+ quality\nMove SL to BE at +20 pips")
     sent = set()
-    daily_count = 0
-    daily_date = dt.now(pytz.timezone("Africa/Nairobi")).date()
     while True:
         try:
             tz = pytz.timezone("Africa/Nairobi")
             now = dt.now(tz)
             last_activity = time.time()
-            if now.date() != daily_date:
-                daily_date = now.date()
-                daily_count = 0
-                sent.clear()
-                print(f"New day {daily_date} - daily count reset", flush=True)
-            print(f"V19 checking... EAT {now} | Daily signals: {daily_count}/4 | Checking 8 pairs", flush=True)
-            if daily_count >= 4:
-                print("Daily limit reached (4/4) - skipping signals until tomorrow", flush=True)
-                time.sleep(180)
-                continue
+            print(f"V21 checking... EAT {now} | Checking 8 pairs | 75+ ONLY UNLIMITED", flush=True)
             for name, ysym in SYMBOLS.items():
                 try:
                     print(f"Checking {name}...", flush=True)
@@ -237,12 +226,8 @@ def bot_loop():
                         if key in sent:
                             continue
                         sent.add(key)
-                        daily_count += 1
-                        msg = (f"🎯 *V19 SNIPER - Score {res['score']}/100*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\nRSI: {res['rsi']}\n\n" + "\n".join(res['details']) + "\n\n🛡️ *RISK RULES:*\nLot: 0.01 ONLY\nMove SL to Break-Even at +20 pips profit\nTrade {daily_count}/4 today - Max 4/day")
+                        msg = (f"🎯 *V21 SNIPER - Score {res['score']}/100*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\nRSI: {res['rsi']}\n\n" + "\n".join(res['details']) + "\n\n🛡️ *RISK RULES:*\nLot: 0.01 ONLY\nMove SL to Break-Even at +20 pips profit\nUNLIMITED - Only 75+ Snipers")
                         send_telegram(msg)
-                        if daily_count >= 4:
-                            send_telegram("⏸️ Daily limit reached (4/4). Bot will resume tomorrow. No more signals today to protect you.")
-                            break
                     else:
                         print(f"{name}: No setup - score <75 or filter fail, skipping", flush=True)
                 except Exception as e:
@@ -258,5 +243,5 @@ if __name__ == "__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
-    print("V19 - Flask is now MAIN thread, Bot is background", flush=True)
+    print("V21 - Flask is now MAIN thread, Bot is background", flush=True)
     run_web()
