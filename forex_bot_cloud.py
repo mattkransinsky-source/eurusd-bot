@@ -220,6 +220,6 @@ def bot_loop():
 if __name__ == "__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
-    threading.Thread(target=run_web, daemon=True).start()
-    print("V18 - Bot loop is now MAIN thread, Flask is background", flush=True)
-    bot_loop()
+    threading.Thread(target=bot_loop, daemon=True).start()
+    print("V18 - Flask is now MAIN thread, Bot is background", flush=True)
+    run_web()
