@@ -1,3 +1,19 @@
+from flask import Flask
+import threading
+import os
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "V14 ALIVE - Bot is running", 200
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+# Start web server in background
+threading.Thread(target=run_web, daemon=True).start()
 import os, time, requests, threading, pytz
 from datetime import datetime as dt
 import yfinance as yf
