@@ -1,20 +1,17 @@
-import os, time, requests, threading, pytz
+import os, time, requests, threading, pytz, gc
 from datetime import datetime as dt
 import yfinance as yf
 from flask import Flask
 
-# ============ WEB SERVER - FOR UPTIMEROBOT ONLY ============
 app = Flask(__name__)
-
 @app.route('/')
 def home():
-    return "V14 ALIVE - Bot is running", 200
+    return "V15 ALIVE - Bot is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-# ============ CONFIG ============
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SYMBOLS = {"XAUUSD": "GC=F", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X"}
@@ -25,6 +22,11 @@ def send_telegram(msg):
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
     except Exception as e:
         print("Telegram error:", e)
+
+def heartbeat():
+    while True:
+        print(f"HEARTBEAT alive - {dt.now(pytz.timezone('Africa/Nairobi'))}")
+        time.sleep(30)
 
 def ema(values, period):
     k = 2 / (period + 1)
@@ -48,9 +50,9 @@ def rsi(values, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def get_data(yahoo_symbol, interval, period="5d"):
+def get_data(yahoo_symbol, interval, period="2d"):
     try:
-        df = yf.download(yahoo_symbol, interval=interval, period=period, progress=False, auto_adjust=False)
+        df = yf.download(yahoo_symbol, interval=interval, period=period, progress=False, auto_adjust=False, threads=False, timeout=20)
         if df.empty:
             return None
         if hasattr(df.columns, 'nlevels') and df.columns.nlevels > 1:
@@ -61,24 +63,20 @@ def get_data(yahoo_symbol, interval, period="5d"):
         return None
 
 def analyze(name, yahoo_sym):
-    df_1h = get_data(yahoo_sym, "60m", "5d")
-    df_15m = get_data(yahoo_sym, "15m", "5d")
+    df_1h = get_data(yahoo_sym, "60m", "2d")
+    df_15m = get_data(yahoo_sym, "15m", "2d")
     if df_1h is None or df_15m is None:
         return None
     if len(df_15m) < 50 or len(df_1h) < 50:
         return None
-
     closes_1h = df_1h['Close'].tolist()
     closes_15m = df_15m['Close'].tolist()
     highs_15m = df_15m['High'].tolist()
     lows_15m = df_15m['Low'].tolist()
     highs_1h = df_1h['High'].tolist()
     lows_1h = df_1h['Low'].tolist()
-
     score = 0
     details = []
-
-    # 1. EMA 50 + 200 (20)
     ema50 = ema(closes_1h, 50)
     ema200 = ema(closes_1h, 20)
     price = closes_1h[-1]
@@ -89,8 +87,6 @@ def analyze(name, yahoo_sym):
         trend = "SELL"; score += 20; details.append("EMA 50+200 ✅ +20")
     else:
         return None
-
-    # 2. 1H BOS (20)
     high_1h_prev = max(highs_1h[-20:-1])
     low_1h_prev = min(lows_1h[-20:-1])
     last_1h_close = closes_1h[-1]
@@ -98,8 +94,6 @@ def analyze(name, yahoo_sym):
     if not bos_ok:
         return None
     score += 20; details.append("1H BOS ✅ +20")
-
-    # 3. Wick Sweep 60%+ (20)
     prev_low = min(lows_15m[-20:-2])
     prev_high = max(highs_15m[-20:-2])
     sweep_c = df_15m.iloc[-3]
@@ -117,8 +111,6 @@ def analyze(name, yahoo_sym):
     if not sweep_ok:
         return None
     score += 20; details.append("Wick Sweep 60%+ ✅ +20")
-
-    # 4. 15m BOS after sweep (15)
     bos15_ok = False
     for i in range(len(df_15m)-3, len(df_15m)-1):
         c = closes_15m[i]
@@ -129,8 +121,6 @@ def analyze(name, yahoo_sym):
     if not bos15_ok:
         return None
     score += 15; details.append("15m BOS after Sweep ✅ +15")
-
-    # 5. FVG Retest (10) + Order Block (5)
     fvg_found = False
     fvg_top = fvg_bottom = 0
     for i in range(len(df_15m)-10, len(df_15m)-2):
@@ -146,7 +136,6 @@ def analyze(name, yahoo_sym):
     if not (fvg_bottom - (fvg_top-fvg_bottom)*0.2 <= current <= fvg_top + (fvg_top-fvg_bottom)*0.2):
         return None
     score += 10; details.append("FVG Retest ✅ +10")
-
     ob_ok = False
     for j in range(5):
         if lows_1h[-5:][j] <= fvg_top and highs_1h[-5:][j] >= fvg_bottom:
@@ -155,18 +144,14 @@ def analyze(name, yahoo_sym):
         score += 5; details.append("Order Block ✅ +5")
     else:
         details.append("Order Block ❌ +0")
-
-    # 6. RSI (10)
     rsi_val = rsi(closes_15m, 14)
     if 40 <= rsi_val <= 60:
         score += 10; details.append(f"RSI {round(rsi_val,1)} ✅ +10")
     else:
         details.append(f"RSI {round(rsi_val,1)} ❌ +0")
-
     print(f"{name} {trend} Score: {score}/100")
     if score < 75:
         return None
-
     entry = current
     if trend == "BUY":
         sl = prev_low - (fvg_top - fvg_bottom)
@@ -178,36 +163,39 @@ def analyze(name, yahoo_sym):
         tp = entry - risk * 2
     if risk <= 0:
         return None
-
     return {"symbol": name, "trend": trend, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp),5), "score": score, "details": details, "rsi": round(float(rsi_val),1)}
 
 def bot_loop():
-    send_telegram("✅ *V14 SNIPER CLOUD is LIVE*\nScore 75+ ONLY\nEMA + BOS + Wick + 15m BOS + FVG Retest + OB + RSI\nUnlimited signals, only snipers.")
+    send_telegram("✅ *V15 SNIPER CLOUD is LIVE*\nScore 75+ ONLY\nEMA + BOS + Wick + 15m BOS + FVG Retest + OB + RSI\nUnlimited signals, only snipers.")
     sent = set()
     while True:
         try:
             tz = pytz.timezone("Africa/Nairobi")
             now = dt.now(tz)
-            print(f"V14 checking... EAT {now} | Killzone REMOVED - checking 24/7")
+            print(f"V15 checking... EAT {now} | Killzone REMOVED - checking 24/7")
             for name, ysym in SYMBOLS.items():
                 try:
+                    print(f"Checking {name}...")
                     res = analyze(name, ysym)
                     if res:
                         key = f"{name}-{res['trend']}-{res['entry']}"
                         if key in sent:
                             continue
                         sent.add(key)
-                        msg = (f"🎯 *V14 SNIPER - Score {res['score']}/100*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\nRSI: {res['rsi']}\n\n" + "\n".join(res['details']) + "\n\nLot: 0.01 ONLY")
+                        msg = (f"🎯 *V15 SNIPER - Score {res['score']}/100*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\nRSI: {res['rsi']}\n\n" + "\n".join(res['details']) + "\n\nLot: 0.01 ONLY")
                         send_telegram(msg)
                     else:
                         print(f"{name}: No setup - score <75 or filter fail, skipping")
                 except Exception as e:
                     print(f"Error {name}: {e}")
-            time.sleep(60)
+            gc.collect()
+            print("Sleeping 120s...")
+            time.sleep(120)
         except Exception as e:
             print(f"Bot loop crash, restarting in 10s: {e}")
             time.sleep(10)
 
 if __name__ == "__main__":
+    threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
     run_web()
