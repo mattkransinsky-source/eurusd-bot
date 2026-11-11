@@ -6,7 +6,7 @@ from flask import Flask
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "V15 ALIVE - Bot is running", 200
+    return "V16 ALIVE - Bot is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -166,13 +166,13 @@ def analyze(name, yahoo_sym):
     return {"symbol": name, "trend": trend, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp),5), "score": score, "details": details, "rsi": round(float(rsi_val),1)}
 
 def bot_loop():
-    send_telegram("✅ *V15 SNIPER CLOUD is LIVE*\nScore 75+ ONLY\nEMA + BOS + Wick + 15m BOS + FVG Retest + OB + RSI\nUnlimited signals, only snipers.")
+    send_telegram("✅ *V16 SNIPER CLOUD is LIVE*\nScore 75+ ONLY\nEMA + BOS + Wick + 15m BOS + FVG Retest + OB + RSI\nUnlimited signals, only snipers.")
     sent = set()
     while True:
         try:
             tz = pytz.timezone("Africa/Nairobi")
             now = dt.now(tz)
-            print(f"V15 checking... EAT {now} | Killzone REMOVED - checking 24/7")
+            print(f"V16 checking... EAT {now} | Killzone REMOVED - checking 24/7")
             for name, ysym in SYMBOLS.items():
                 try:
                     print(f"Checking {name}...")
@@ -182,7 +182,7 @@ def bot_loop():
                         if key in sent:
                             continue
                         sent.add(key)
-                        msg = (f"🎯 *V15 SNIPER - Score {res['score']}/100*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\nRSI: {res['rsi']}\n\n" + "\n".join(res['details']) + "\n\nLot: 0.01 ONLY")
+                        msg = (f"🎯 *V16 SNIPER - Score {res['score']}/100*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\nRSI: {res['rsi']}\n\n" + "\n".join(res['details']) + "\n\nLot: 0.01 ONLY")
                         send_telegram(msg)
                     else:
                         print(f"{name}: No setup - score <75 or filter fail, skipping")
@@ -197,5 +197,6 @@ def bot_loop():
 
 if __name__ == "__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
-    threading.Thread(target=bot_loop, daemon=True).start()
-    run_web()
+    threading.Thread(target=run_web, daemon=True).start()
+    print("V16 - Bot loop is now MAIN thread, Flask is background")
+    bot_loop()
