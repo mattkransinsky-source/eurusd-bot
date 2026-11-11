@@ -5,13 +5,25 @@ from flask import Flask
 
 app = Flask(__name__)
 
-@app.route('/')
+@app.route('/', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def home():
     return "V18 ALIVE - Bot is running", 200
 
-@app.route('/health')
+@app.route('/health', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def health():
     return "OK", 200
+
+@app.route('/<path:path>', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
+def catch_all(path):
+    return "V18 ALIVE - Bot is running", 200
+
+@app.errorhandler(404)
+def not_found(e):
+    return "V18 ALIVE - Bot is running", 200
+
+@app.errorhandler(405)
+def method_not_allowed(e):
+    return "V18 ALIVE - Bot is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
