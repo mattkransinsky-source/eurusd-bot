@@ -1,7 +1,9 @@
+import os, time, requests, threading, pytz
+from datetime import datetime as dt
+import yfinance as yf
 from flask import Flask
-import threading
-import os
 
+# ============ WEB SERVER - FOR UPTIMEROBOT ONLY ============
 app = Flask(__name__)
 
 @app.route('/')
@@ -11,18 +13,6 @@ def home():
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
-# Start web server in background
-threading.Thread(target=run_web, daemon=True).start()
-import os, time, requests, threading, pytz
-from datetime import datetime as dt
-import yfinance as yf
-from flask import Flask
-
-app = Flask(__name__)
-@app.route('/')
-def home():
-    return "V14 SNIPER LIVE - 75+"
 
 # ============ CONFIG ============
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -195,26 +185,29 @@ def bot_loop():
     send_telegram("✅ *V14 SNIPER CLOUD is LIVE*\nScore 75+ ONLY\nEMA + BOS + Wick + 15m BOS + FVG Retest + OB + RSI\nUnlimited signals, only snipers.")
     sent = set()
     while True:
-        tz = pytz.timezone("Africa/Nairobi")
-        now = dt.now(tz)
-        print(f"V14 checking... EAT {now} | Killzone REMOVED - checking 24/7")
-        for name, ysym in SYMBOLS.items():
-            try:
-                res = analyze(name, ysym)
-                if res:
-                    key = f"{name}-{res['trend']}-{res['entry']}"
-                    if key in sent:
-                        continue
-                    sent.add(key)
-                    msg = (f"🎯 *V14 SNIPER - Score {res['score']}/100*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\nRSI: {res['rsi']}\n\n" + "\n".join(res['details']) + "\n\nLot: 0.01 ONLY")
-                    send_telegram(msg)
-                else:
-                    print(f"{name}: No setup - score <75 or filter fail, skipping")
-            except Exception as e:
-                print(f"Error {name}: {e}")
-        time.sleep(60)
+        try:
+            tz = pytz.timezone("Africa/Nairobi")
+            now = dt.now(tz)
+            print(f"V14 checking... EAT {now} | Killzone REMOVED - checking 24/7")
+            for name, ysym in SYMBOLS.items():
+                try:
+                    res = analyze(name, ysym)
+                    if res:
+                        key = f"{name}-{res['trend']}-{res['entry']}"
+                        if key in sent:
+                            continue
+                        sent.add(key)
+                        msg = (f"🎯 *V14 SNIPER - Score {res['score']}/100*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\nRSI: {res['rsi']}\n\n" + "\n".join(res['details']) + "\n\nLot: 0.01 ONLY")
+                        send_telegram(msg)
+                    else:
+                        print(f"{name}: No setup - score <75 or filter fail, skipping")
+                except Exception as e:
+                    print(f"Error {name}: {e}")
+            time.sleep(60)
+        except Exception as e:
+            print(f"Bot loop crash, restarting in 10s: {e}")
+            time.sleep(10)
 
 if __name__ == "__main__":
     threading.Thread(target=bot_loop, daemon=True).start()
-    port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    run_web()
