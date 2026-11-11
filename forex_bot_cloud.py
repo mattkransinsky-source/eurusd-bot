@@ -2,11 +2,12 @@ import os, time, requests, threading, pytz, gc
 from datetime import datetime as dt
 import yfinance as yf
 from flask import Flask
+from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "V16 ALIVE - Bot is running", 200
+    return "V17 ALIVE - Bot is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -16,6 +17,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SYMBOLS = {"XAUUSD": "GC=F", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X"}
 
+last_activity = time.time()
+
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
@@ -24,9 +27,21 @@ def send_telegram(msg):
         print("Telegram error:", e)
 
 def heartbeat():
+    global last_activity
     while True:
+        last_activity = time.time()
         print(f"HEARTBEAT alive - {dt.now(pytz.timezone('Africa/Nairobi'))}")
         time.sleep(30)
+
+def watchdog():
+    global last_activity
+    while True:
+        time.sleep(30)
+        idle = time.time() - last_activity
+        print(f"WATCHDOG check - idle {int(idle)}s")
+        if idle > 180:
+            print("WATCHDOG: Frozen for 180s, force restarting...")
+            os._exit(1)
 
 def ema(values, period):
     k = 2 / (period + 1)
@@ -165,24 +180,39 @@ def analyze(name, yahoo_sym):
         return None
     return {"symbol": name, "trend": trend, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp),5), "score": score, "details": details, "rsi": round(float(rsi_val),1)}
 
+def analyze_with_timeout(name, ysym):
+    global last_activity
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(analyze, name, ysym)
+            res = future.result(timeout=45)
+            last_activity = time.time()
+            return res
+    except Exception as e:
+        print(f"Timeout/Error {name} after 45s: {e}")
+        last_activity = time.time()
+        return None
+
 def bot_loop():
-    send_telegram("✅ *V16 SNIPER CLOUD is LIVE*\nScore 75+ ONLY\nEMA + BOS + Wick + 15m BOS + FVG Retest + OB + RSI\nUnlimited signals, only snipers.")
+    global last_activity
+    send_telegram("✅ *V17 SNIPER CLOUD is LIVE*\nScore 75+ ONLY\nEMA + BOS + Wick + 15m BOS + FVG Retest + OB + RSI\nUnlimited signals, only snipers.")
     sent = set()
     while True:
         try:
             tz = pytz.timezone("Africa/Nairobi")
             now = dt.now(tz)
-            print(f"V16 checking... EAT {now} | Killzone REMOVED - checking 24/7")
+            last_activity = time.time()
+            print(f"V17 checking... EAT {now} | Killzone REMOVED - checking 24/7")
             for name, ysym in SYMBOLS.items():
                 try:
                     print(f"Checking {name}...")
-                    res = analyze(name, ysym)
+                    res = analyze_with_timeout(name, ysym)
                     if res:
                         key = f"{name}-{res['trend']}-{res['entry']}"
                         if key in sent:
                             continue
                         sent.add(key)
-                        msg = (f"🎯 *V16 SNIPER - Score {res['score']}/100*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\nRSI: {res['rsi']}\n\n" + "\n".join(res['details']) + "\n\nLot: 0.01 ONLY")
+                        msg = (f"🎯 *V17 SNIPER - Score {res['score']}/100*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\nRSI: {res['rsi']}\n\n" + "\n".join(res['details']) + "\n\nLot: 0.01 ONLY")
                         send_telegram(msg)
                     else:
                         print(f"{name}: No setup - score <75 or filter fail, skipping")
@@ -197,6 +227,7 @@ def bot_loop():
 
 if __name__ == "__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
+    threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=run_web, daemon=True).start()
-    print("V16 - Bot loop is now MAIN thread, Flask is background")
+    print("V17 - Bot loop is now MAIN thread, Flask is background")
     bot_loop()
