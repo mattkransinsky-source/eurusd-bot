@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 @app.route('/', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def home():
-    return "V23 ALIVE - Bot is running", 200
+    return "V25 ALIVE - Bot is running", 200
 
 @app.route('/health', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def health():
@@ -15,15 +15,15 @@ def health():
 
 @app.route('/<path:path>', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def catch_all(path):
-    return "V23 ALIVE - Bot is running", 200
+    return "V25 ALIVE - Bot is running", 200
 
 @app.errorhandler(404)
 def not_found(e):
-    return "V23 ALIVE - Bot is running", 200
+    return "V25 ALIVE - Bot is running", 200
 
 @app.errorhandler(405)
 def method_not_allowed(e):
-    return "V23 ALIVE - Bot is running", 200
+    return "V25 ALIVE - Bot is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -32,16 +32,20 @@ def run_web():
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-# V23 - 8 PAIRS, TIERED, FVG 50% TOLERANCE
+# V25 - 12 PAIRS, CORE ONLY BLOCKS, BONUS SCORING
 SYMBOLS = {
     "XAUUSD": "GC=F",
+    "XAGUSD": "SI=F",
     "EURUSD": "EURUSD=X",
     "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X",
     "GBPJPY": "GBPJPY=X",
     "AUDUSD": "AUDUSD=X",
     "EURJPY": "EURJPY=X",
-    "US30": "YM=F"
+    "US30": "YM=F",
+    "USDCHF": "USDCHF=X",
+    "NZDUSD": "NZDUSD=X",
+    "EURGBP": "EURGBP=X"
 }
 
 last_activity = time.time()
@@ -108,23 +112,26 @@ def analyze(name, yahoo_sym):
     ema200 = ema(closes_1h, 20)
     price = closes_1h[-1]
     trend = None
+    # CORE 1: EMA - MUST PASS - 30 pts
     if price > ema50 and price > ema200:
-        trend = "BUY"; score += 20; details.append("EMA 50+200 ✅ +20")
+        trend = "BUY"; score += 30; details.append("EMA 50+200 ✅ +30")
     elif price < ema50 and price < ema200:
-        trend = "SELL"; score += 20; details.append("EMA 50+200 ✅ +20")
+        trend = "SELL"; score += 30; details.append("EMA 50+200 ✅ +30")
     else:
         return None
+    # CORE 2: 1H BOS - MUST PASS - 30 pts
     high_1h_prev = max(highs_1h[-20:-1])
     low_1h_prev = min(lows_1h[-20:-1])
     last_1h_close = closes_1h[-1]
     bos_ok = (trend == "BUY" and last_1h_close > high_1h_prev) or (trend == "SELL" and last_1h_close < low_1h_prev)
     if not bos_ok:
         return None
-    score += 20; details.append("1H BOS ✅ +20")
+    score += 30; details.append("1H BOS ✅ +30")
     prev_low = min(lows_15m[-20:-2])
     prev_high = max(highs_15m[-20:-2])
+    # BONUS 1: Wick Sweep - OPTIONAL - +20 if present, +0 if not
     sweep_ok = False
-    for idx in [-4, -3, -2]:
+    for idx in [-6, -5, -4, -3, -2]:
         sweep_c = df_15m.iloc[idx]
         if trend == "BUY" and sweep_c['Low'] < prev_low and sweep_c['Close'] > prev_low:
             rng = sweep_c['High'] - sweep_c['Low']
@@ -138,22 +145,26 @@ def analyze(name, yahoo_sym):
             if rng > 0 and wick / rng > 0.5:
                 sweep_ok = True
                 break
-    if not sweep_ok:
-        return None
-    score += 20; details.append("Wick Sweep 50%+ ✅ +20")
+    if sweep_ok:
+        score += 20; details.append("Wick Sweep 50%+ ✅ +20")
+    else:
+        details.append("Wick Sweep ❌ +0")
+    # BONUS 2: 15m BOS - OPTIONAL - +15 if present
     bos15_ok = False
-    for i in range(len(df_15m)-3, len(df_15m)-1):
+    for i in range(len(df_15m)-5, len(df_15m)-1):
         c = closes_15m[i]
         if trend == "BUY" and c > max(highs_15m[i-5:i]):
             bos15_ok = True
         if trend == "SELL" and c < min(lows_15m[i-5:i]):
             bos15_ok = True
-    if not bos15_ok:
-        return None
-    score += 15; details.append("15m BOS after Sweep ✅ +15")
+    if bos15_ok:
+        score += 15; details.append("15m BOS ✅ +15")
+    else:
+        details.append("15m BOS ❌ +0")
+    # CORE 3: FVG - MUST PASS - 25 pts
     fvg_found = False
     fvg_top = fvg_bottom = 0
-    for i in range(len(df_15m)-10, len(df_15m)-2):
+    for i in range(len(df_15m)-15, len(df_15m)-2):
         h1 = highs_15m[i]; l1 = lows_15m[i]
         h3 = highs_15m[i+2]; l3 = lows_15m[i+2]
         if trend == "BUY" and h1 < l3:
@@ -163,10 +174,10 @@ def analyze(name, yahoo_sym):
     if not fvg_found:
         return None
     current = closes_15m[-1]
-    # V23: FVG tolerance 50% (was 20%)
     if not (fvg_bottom - (fvg_top-fvg_bottom)*0.5 <= current <= fvg_top + (fvg_top-fvg_bottom)*0.5):
         return None
-    score += 15; details.append("FVG Retest 50% Tol ✅ +15")
+    score += 25; details.append("FVG Retest 50% Tol ✅ +25")
+    # BONUS 3: OB - OPTIONAL - +5
     ob_ok = False
     for j in range(5):
         if lows_1h[-5:][j] <= fvg_top and highs_1h[-5:][j] >= fvg_bottom:
@@ -175,8 +186,8 @@ def analyze(name, yahoo_sym):
         score += 5; details.append("Order Block ✅ +5")
     else:
         details.append("Order Block ❌ +0")
-    print(f"{name} {trend} Score: {score}/95", flush=True)
-    if score < 75:
+    print(f"{name} {trend} Score: {score}/125", flush=True)
+    if score < 70:
         return None
     entry = current
     if trend == "BUY":
@@ -189,20 +200,19 @@ def analyze(name, yahoo_sym):
         tp = entry - risk * 2
     if risk <= 0:
         return None
-    # Tier
-    tier = "🔥 PERFECT SNIPER" if score >= 85 else "⚡ GOOD SNIPER"
+    tier = "🔥 PERFECT SNIPER" if score >= 100 else "⚡ GOOD SNIPER"
     return {"symbol": name, "trend": trend, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp),5), "score": score, "details": details, "tier": tier}
 
 def bot_loop():
     global last_activity
-    send_telegram("✅ *V23 SNIPER CLOUD is LIVE*\n8 Pairs | Score 75+ ONLY | UNLIMITED\nEMA + BOS + Wick 50% + 15m BOS + FVG 50% Tol + OB\n🔥 85+ PERFECT | ⚡ 75-84 GOOD\nMove SL to BE at +20 pips")
+    send_telegram("✅ *V25 SNIPER CLOUD is LIVE*\n12 Pairs | Score 70+ ONLY | UNLIMITED\nCORE: EMA 30 + BOS 30 + FVG 25 = MUST PASS\nBONUS: Wick +20, 15m BOS +15, OB +5\n🔥 100+ PERFECT | ⚡ 70-99 GOOD\nMove SL to BE at +20 pips")
     sent = set()
     while True:
         try:
             tz = pytz.timezone("Africa/Nairobi")
             now = dt.now(tz)
             last_activity = time.time()
-            print(f"V23 checking... EAT {now} | Checking 8 pairs | 75+ ONLY UNLIMITED", flush=True)
+            print(f"V25 checking... EAT {now} | Checking 12 pairs | 70+ ONLY UNLIMITED", flush=True)
             for name, ysym in SYMBOLS.items():
                 try:
                     print(f"Checking {name}...", flush=True)
@@ -212,11 +222,11 @@ def bot_loop():
                         if key in sent:
                             continue
                         sent.add(key)
-                        be_rule = "Move SL to BE at +20 pips" if res['score'] >= 85 else "Move SL to BE FAST at +15 pips"
-                        msg = (f"🎯 *V23 {res['tier']} - Score {res['score']}/95*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\n\n" + "\n".join(res['details']) + f"\n\n🛡️ *RISK RULES:*\nLot: 0.01 ONLY\n{be_rule}\nUNLIMITED - Only 75+ Snipers")
+                        be_rule = "Move SL to BE at +20 pips" if res['score'] >= 100 else "Move SL to BE FAST at +15 pips"
+                        msg = (f"🎯 *V25 {res['tier']} - Score {res['score']}/125*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\n\n" + "\n".join(res['details']) + f"\n\n🛡️ *RISK RULES:*\nLot: 0.01 ONLY\n{be_rule}\nUNLIMITED - Only 70+ Snipers")
                         send_telegram(msg)
                     else:
-                        print(f"{name}: No setup - score <75 or filter fail, skipping", flush=True)
+                        print(f"{name}: No setup - score <70 or filter fail, skipping", flush=True)
                 except Exception as e:
                     print(f"Error {name}: {e}", flush=True)
             gc.collect()
@@ -230,5 +240,5 @@ if __name__ == "__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
-    print("V23 - Flask is now MAIN thread, Bot is background", flush=True)
+    print("V25 - Flask is now MAIN thread, Bot is background", flush=True)
     run_web()
