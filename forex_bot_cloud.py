@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 @app.route('/', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def home():
-    return "V30 SCALPER ALIVE", 200
+    return "V31 SMART SCALPER ALIVE", 200
 
 @app.route('/health', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def health():
@@ -15,15 +15,15 @@ def health():
 
 @app.route('/<path:path>', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def catch_all(path):
-    return "V30 SCALPER ALIVE", 200
+    return "V31 SMART SCALPER ALIVE", 200
 
 @app.errorhandler(404)
 def not_found(e):
-    return "V30 SCALPER ALIVE", 200
+    return "V31 SMART SCALPER ALIVE", 200
 
 @app.errorhandler(405)
 def method_not_allowed(e):
-    return "V30 SCALPER ALIVE", 200
+    return "V31 SMART SCALPER ALIVE", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -32,7 +32,7 @@ def run_web():
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-# V30 SCALPER - 5 FAST PAIRS ONLY, 15m + 5m, 75/125, QUICK TPs
+# V31 FINAL - 70/120, ONE TP, 24/7, RSI + 1H + ATR
 SYMBOLS = {
     "XAUUSD": "GC=F",
     "GBPJPY": "GBPJPY=X",
@@ -74,6 +74,33 @@ def ema(values, period):
         e = v * k + e * (1 - k)
     return e
 
+def rsi(values, period=14):
+    if len(values) < period + 1:
+        return 50
+    gains = []
+    losses = []
+    for i in range(1, len(values)):
+        diff = values[i] - values[i-1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+    gains = gains[-period:]
+    losses = losses[-period:]
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    if avg_loss == 0:
+        return 100
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def atr(highs, lows, closes, period=14):
+    if len(closes) < period + 1:
+        return (closes[-1] - closes[0]) * 0.001 if closes else 0
+    trs = []
+    for i in range(1, len(closes)):
+        tr = max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
+        trs.append(tr)
+    return sum(trs[-period:]) / period
+
 def get_data(yahoo_symbol, interval, period="2d"):
     try:
         df = yf.download(yahoo_symbol, interval=interval, period=period, progress=False, auto_adjust=False, threads=False, timeout=20)
@@ -87,21 +114,35 @@ def get_data(yahoo_symbol, interval, period="2d"):
         return None
 
 def analyze(name, yahoo_sym):
-    # SCALPER: 15m = trend, 5m = entry
+    df_1h = get_data(yahoo_sym, "1h", "5d")
     df_15m = get_data(yahoo_sym, "15m", "2d")
     df_5m = get_data(yahoo_sym, "5m", "2d")
-    if df_15m is None or df_5m is None:
+    if df_15m is None or df_5m is None or df_1h is None:
         return {"fail": True, "score": 0, "reason": "No data"}
-    if len(df_5m) < 50 or len(df_15m) < 50:
-        return {"fail": True, "score": 0, "reason": f"Not enough candles 15m={len(df_15m)} 5m={len(df_5m)}"}
+    if len(df_5m) < 50 or len(df_15m) < 50 or len(df_1h) < 20:
+        return {"fail": True, "score": 0, "reason": "Not enough candles"}
     closes_15m = df_15m['Close'].tolist()
     closes_5m = df_5m['Close'].tolist()
+    closes_1h = df_1h['Close'].tolist()
     highs_5m = df_5m['High'].tolist()
     lows_5m = df_5m['Low'].tolist()
     highs_15m = df_15m['High'].tolist()
     lows_15m = df_15m['Low'].tolist()
+
     score = 0
     details = []
+
+    # --- 1H TREND FILTER ---
+    ema50_1h = ema(closes_1h, 50)
+    ema20_1h = ema(closes_1h, 20)
+    price_1h = closes_1h[-1]
+    htf_trend = None
+    if price_1h > ema50_1h and price_1h > ema20_1h:
+        htf_trend = "BUY"
+    elif price_1h < ema50_1h and price_1h < ema20_1h:
+        htf_trend = "SELL"
+
+    # --- 15m TREND ---
     ema50 = ema(closes_15m, 50)
     ema200 = ema(closes_15m, 20)
     price = closes_15m[-1]
@@ -112,6 +153,22 @@ def analyze(name, yahoo_sym):
         trend = "SELL"; score += 30; details.append("15m EMA 50+200 ✅ +30")
     else:
         return {"fail": True, "score": score, "reason": "EMA fail - ranging", "trend": "NONE"}
+
+    if htf_trend is not None and htf_trend != trend:
+        return {"fail": True, "score": score, "reason": f"1H Trend Conflict - 1H {htf_trend} vs 15m {trend}", "trend": trend, "details": details}
+    if htf_trend == trend:
+        details.append(f"1H Trend Agrees ✅ {htf_trend}")
+    else:
+        details.append(f"1H Neutral - allowing 15m {trend}")
+
+    # --- RSI FILTER ---
+    rsi_15m = rsi(closes_15m, 14)
+    if trend == "BUY" and rsi_15m > 70:
+        return {"fail": True, "score": score, "reason": f"RSI Overbought {rsi_15m:.1f} - skip BUY", "trend": trend, "details": details}
+    if trend == "SELL" and rsi_15m < 30:
+        return {"fail": True, "score": score, "reason": f"RSI Oversold {rsi_15m:.1f} - skip SELL", "trend": trend, "details": details}
+    details.append(f"RSI {rsi_15m:.1f} OK ✅")
+
     high_15m_prev = max(highs_15m[-20:-1])
     low_15m_prev = min(lows_15m[-20:-1])
     last_15m_close = closes_15m[-1]
@@ -120,6 +177,7 @@ def analyze(name, yahoo_sym):
         score += 30; details.append("15m BOS ✅ +30")
     else:
         details.append("15m BOS ❌ +0")
+
     prev_low = min(lows_5m[-20:-2])
     prev_high = max(highs_5m[-20:-2])
     sweep_ok = False
@@ -141,6 +199,7 @@ def analyze(name, yahoo_sym):
         score += 20; details.append("5m Wick Sweep 50%+ ✅ +20")
     else:
         details.append("Wick Sweep ❌ +0")
+
     bos5_ok = False
     for i in range(len(df_5m)-5, len(df_5m)-1):
         c = closes_5m[i]
@@ -152,6 +211,7 @@ def analyze(name, yahoo_sym):
         score += 15; details.append("5m BOS ✅ +15")
     else:
         details.append("5m BOS ❌ +0")
+
     fvg_found = False
     fvg_top = fvg_bottom = 0
     fvg_ok = False
@@ -172,17 +232,10 @@ def analyze(name, yahoo_sym):
     else:
         score += 25; details.append("FVG Retest 50% Tol ✅ +25")
         fvg_ok = True
-    ob_ok = False
-    for j in range(5):
-        if lows_15m[-5:][j] <= fvg_top and highs_15m[-5:][j] >= fvg_bottom:
-            ob_ok = True
-    if ob_ok:
-        score += 5; details.append("Order Block ✅ +5")
-    else:
-        details.append("Order Block ❌ +0")
-    print(f"{name} {trend} Score: {score}/125", flush=True)
-    if score < 75:
-        return {"fail": True, "score": score, "reason": "Score <75", "trend": trend, "details": details}
+
+    print(f"{name} {trend} Score: {score}/120 RSI:{rsi_15m:.1f} 1H:{htf_trend}", flush=True)
+    if score < 70:
+        return {"fail": True, "score": score, "reason": "Score <70", "trend": trend, "details": details}
     if not bos_ok and not fvg_ok:
         return {"fail": True, "score": score, "reason": "Quality Gate FAIL - No BOS + No FVG", "trend": trend, "details": details}
     if fvg_found:
@@ -205,47 +258,43 @@ def analyze(name, yahoo_sym):
             order_type = "SELL LIMIT"
         else:
             order_type = "SELL STOP"
+
+    # --- ATR SL ---
+    atr_val = atr(highs_5m, lows_5m, closes_5m, 14)
+    if atr_val <= 0:
+        atr_val = abs(entry * 0.001)
     if trend == "BUY":
-        sl = prev_low - (fvg_top - fvg_bottom)
+        sl = entry - atr_val * 1.5
+        struct_sl = prev_low - (fvg_top - fvg_bottom)
+        sl = min(sl, struct_sl) if struct_sl < entry else sl
         risk = entry - sl
-        # SCALPER TPs - Small & Fast
-        tp1 = entry + risk * 0.5
-        tp2 = entry + risk * 1.0
-        tp3 = entry + risk * 1.5
+        tp = entry + risk * 0.5
     else:
-        sl = prev_high + (fvg_top - fvg_bottom)
+        sl = entry + atr_val * 1.5
+        struct_sl = prev_high + (fvg_top - fvg_bottom)
+        sl = max(sl, struct_sl) if struct_sl > entry else sl
         risk = sl - entry
-        tp1 = entry - risk * 0.5
-        tp2 = entry - risk * 1.0
-        tp3 = entry - risk * 1.5
+        tp = entry - risk * 0.5
     if risk <= 0:
         return {"fail": True, "score": score, "reason": "Risk <=0", "trend": trend}
     if risk / entry > 0.015:
         return {"fail": True, "score": score, "reason": "SL too wide", "trend": trend, "details": details}
-    confidence = round((score / 125) * 100, 1)
-    tier = "⚡ SCALPER 75+"
-    return {"symbol": name, "trend": trend, "order_type": order_type, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp1": round(float(tp1),5), "tp2": round(float(tp2),5), "tp3": round(float(tp3),5), "score": score, "confidence": confidence, "details": details, "tier": tier, "live_price": round(float(current),5)}
+    confidence = round((score / 120) * 100, 1)
+    tier = "🧠 SMART 70+"
+    return {"symbol": name, "trend": trend, "order_type": order_type, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp),5), "score": score, "confidence": confidence, "details": details, "tier": tier, "live_price": round(float(current),5), "rsi": round(float(rsi_15m),1), "htf": htf_trend}
 
 def bot_loop():
     global last_activity
-    send_telegram("✅ *V30 SCALPER is LIVE*\n5 Fast Pairs | 15m + 5m | Score 75+ /125 | TP 0.5R / 1R / 1.5R\nSession: 15:00-19:00 EAT ONLY (London+NY Overlap)\n⚡ MAX HOLD: 1 HOUR - Scalps Only\nTP1 0.5R 50% | TP2 1R 30% | TP3 1.5R 20%\n👀 Hunting every 1 min")
+    send_telegram("✅ *V31 SMART SCALPER is LIVE*\n5 Fast Pairs | 15m + 5m + 1H Filter | Score 70+ /120 | ONE TP ONLY 0.5R\nSMART: RSI + 1H Trend + ATR SL\nNO SESSION FILTER - Running 24/7\n⚡ MAX HOLD: 1 HOUR\n👀 Hunting every 1 min")
     sent = set()
     last_hunt_msg = time.time()
+    last_sent_time = {}
     while True:
         try:
             tz = pytz.timezone("Africa/Nairobi")
             now = dt.now(tz)
             last_activity = time.time()
-            hour = now.hour
-            # SCALPER SESSION - Overlap only for max speed
-            in_session = 15 <= hour < 19
-            print(f"V30 SCALPER checking... EAT {now} | Session: {'ON' if in_session else 'OFF'} | 75+ /125", flush=True)
-            if not in_session:
-                if (time.time() - last_hunt_msg) >= 3600:
-                    send_telegram(f"😴 *Outside Scalp Session*\nScalper sleeps. Back at 15:00 EAT (London+NY Overlap).\nTime now: {now.strftime('%H:%M')} EAT")
-                    last_hunt_msg = time.time()
-                time.sleep(60)
-                continue
+            print(f"V31 SMART checking... EAT {now} | 24/7 ON | 70+ /120", flush=True)
             found_this_round = 0
             best_score_this_round = 0
             best_pair_this_round = "None"
@@ -256,11 +305,16 @@ def bot_loop():
                     if res and not res.get("fail"):
                         found_this_round += 1
                         last_hunt_msg = time.time()
+                        cool_key = f"{name}-{res['trend']}"
+                        if cool_key in last_sent_time and (time.time() - last_sent_time[cool_key]) < 3600:
+                            print(f"{name} {res['trend']} in cooldown, skipping", flush=True)
+                            continue
                         key = f"{name}-{res['trend']}-{res['entry']}"
                         if key in sent:
                             continue
                         sent.add(key)
-                        msg = (f"⚡ *V30 {res['tier']} - Score {res['score']}/125 ({res['confidence']}%) *\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nOrder Type: {res['order_type']}\nLive Price: {res['live_price']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP1: {res['tp1']} (0.5R - Close 50%)\nTP2: {res['tp2']} (1R - Close 30%)\nTP3: {res['tp3']} (1.5R - Close 20% Runner)\n\n" + "\n".join(res['details']) + f"\n\n🛡️ *SCALP RULES:*\nLot: 0.01 ONLY\nMove SL to BE when TP1 hits\n⏰ MAX HOLD 1H - Close after 1h if not at TP1\n⏰ If LIMIT not filled in 30 mins, CANCEL it\nSession: 15:00-19:00 EAT ONLY")
+                        last_sent_time[cool_key] = time.time()
+                        msg = (f"🧠 *V31 {res['tier']} - Score {res['score']}/120 ({res['confidence']}%) *\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nOrder Type: {res['order_type']}\nLive Price: {res['live_price']}\nEntry: {res['entry']}\nSL: {res['sl']} (ATR 1.5x)\nTP: {res['tp']} (0.5R - Close 100%)\nRSI: {res['rsi']} | 1H Trend: {res['htf']}\n\n" + "\n".join(res['details']) + f"\n\n🛡️ *SCALP RULES:*\nLot: 0.01 ONLY\n⏰ MAX HOLD 1H - Close after 1h if not at TP\n⏰ If LIMIT not filled in 30 mins, CANCEL it\nRunning 24/7 - No Session Filter")
                         send_telegram(msg)
                     else:
                         sc = res.get("score", 0) if res else 0
@@ -269,11 +323,11 @@ def bot_loop():
                             best_pair_this_round = name
                         reason = res.get("reason", "Unknown") if res else "None"
                         tr = res.get("trend", "?") if res else "?"
-                        print(f"{name}: Score {sc}/125 - {tr} - {reason} - skipping", flush=True)
+                        print(f"{name}: Score {sc}/120 - {tr} - {reason} - skipping", flush=True)
                 except Exception as e:
                     print(f"Error {name}: {e}", flush=True)
             if found_this_round == 0 and (time.time() - last_hunt_msg) >= 1800:
-                send_telegram(f"👀 *Still Hunting Scalps...*\n\nNo 75+ scalp yet. Checking 5 fast pairs.\nBest close: {best_pair_this_round} - {best_score_this_round}/125\nEAT {now.strftime('%H:%M')}")
+                send_telegram(f"👀 *Still Hunting Smart Scalps...*\n\nNo 70+ scalp yet. Checking 5 fast pairs.\nBest close: {best_pair_this_round} - {best_score_this_round}/120\nEAT {now.strftime('%H:%M')}")
                 last_hunt_msg = time.time()
             gc.collect()
             print("Sleeping 60s...", flush=True)
@@ -286,5 +340,5 @@ if __name__ == "__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
-    print("V30 SCALPER - Flask is now MAIN thread, Bot is background", flush=True)
+    print("V31 SMART SCALPER - Flask is now MAIN thread, Bot is background", flush=True)
     run_web()
