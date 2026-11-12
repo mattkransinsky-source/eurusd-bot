@@ -32,7 +32,7 @@ def run_web():
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-# V25 - 12 PAIRS, SCORE 70+ = TRADE, BOS/FVG OPTIONAL
+# V25 - 12 PAIRS, SCORE 70+ = TRADE, BOS/FVG OPTIONAL, 5D DATA FIX
 SYMBOLS = {
     "XAUUSD": "GC=F",
     "XAGUSD": "SI=F",
@@ -81,7 +81,7 @@ def ema(values, period):
         e = v * k + e * (1 - k)
     return e
 
-def get_data(yahoo_symbol, interval, period="1d"):
+def get_data(yahoo_symbol, interval, period="5d"):
     try:
         df = yf.download(yahoo_symbol, interval=interval, period=period, progress=False, auto_adjust=False, threads=False, timeout=20)
         if df.empty:
@@ -94,12 +94,12 @@ def get_data(yahoo_symbol, interval, period="1d"):
         return None
 
 def analyze(name, yahoo_sym):
-    df_1h = get_data(yahoo_sym, "60m", "1d")
-    df_15m = get_data(yahoo_sym, "15m", "1d")
+    df_1h = get_data(yahoo_sym, "60m", "5d")
+    df_15m = get_data(yahoo_sym, "15m", "5d")
     if df_1h is None or df_15m is None:
         return {"fail": True, "score": 0, "reason": "No data"}
     if len(df_15m) < 50 or len(df_1h) < 50:
-        return {"fail": True, "score": 0, "reason": "Not enough candles"}
+        return {"fail": True, "score": 0, "reason": f"Not enough candles 1h={len(df_1h)} 15m={len(df_15m)}"}
     closes_1h = df_1h['Close'].tolist()
     closes_15m = df_15m['Close'].tolist()
     highs_15m = df_15m['High'].tolist()
