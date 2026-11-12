@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 @app.route('/', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def home():
-    return "V26.2 ALIVE - Bot is running", 200
+    return "V26.4 ALIVE - Bot is running", 200
 
 @app.route('/health', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def health():
@@ -15,15 +15,15 @@ def health():
 
 @app.route('/<path:path>', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def catch_all(path):
-    return "V26.2 ALIVE - Bot is running", 200
+    return "V26.4 ALIVE - Bot is running", 200
 
 @app.errorhandler(404)
 def not_found(e):
-    return "V26.2 ALIVE - Bot is running", 200
+    return "V26.4 ALIVE - Bot is running", 200
 
 @app.errorhandler(405)
 def method_not_allowed(e):
-    return "V26.2 ALIVE - Bot is running", 200
+    return "V26.4 ALIVE - Bot is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -32,7 +32,7 @@ def run_web():
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-# V26.2 - 12 PAIRS, 80%+ ONLY, TP1/TP2/TP3, ORDER TYPE AUTO
+# V26.4 - 12 PAIRS, SCORE 88/125 = 70%+ ONLY, TP1/TP2/TP3, ORDER TYPE AUTO
 SYMBOLS = {
     "XAUUSD": "GC=F",
     "XAGUSD": "SI=F",
@@ -185,14 +185,13 @@ def analyze(name, yahoo_sym):
     else:
         details.append("Order Block ❌ +0")
     print(f"{name} {trend} Score: {score}/125", flush=True)
-    if score < 100:
-        return {"fail": True, "score": score, "reason": "Score <100 (80%+)", "trend": trend, "details": details}
-    # V26.2: ENTRY = FVG MIDPOINT so we get real LIMIT/STOP
+    # V26.4: TRUE 70%+ = 88/125
+    if score < 88:
+        return {"fail": True, "score": score, "reason": "Score <88 (70%+)", "trend": trend, "details": details}
     if fvg_found:
         entry = (fvg_top + fvg_bottom) / 2
     else:
         entry = current
-    # ORDER TYPE AUTO - Compare Entry vs Live Price
     if trend == "BUY":
         if abs(entry - current) < (current * 0.0002):
             order_type = "BUY MARKET - Buy Now"
@@ -222,12 +221,12 @@ def analyze(name, yahoo_sym):
     if risk <= 0:
         return {"fail": True, "score": score, "reason": "Risk <=0", "trend": trend}
     confidence = round((score / 125) * 100, 1)
-    tier = "🔥 80%+ PERFECT SNIPER"
+    tier = "🔥 70%+ SNIPER"
     return {"symbol": name, "trend": trend, "order_type": order_type, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp1": round(float(tp1),5), "tp2": round(float(tp2),5), "tp3": round(float(tp3),5), "score": score, "confidence": confidence, "details": details, "tier": tier, "live_price": round(float(current),5)}
 
 def bot_loop():
     global last_activity
-    send_telegram("✅ *V26.2 SNIPER CLOUD is LIVE*\n12 Pairs | Score 100+ (80%+) ONLY | TP1/TP2/TP3 | Order Type Auto\nEMA 30 + BOS 30 + FVG 25 + BONUS 40 = 125\n🔥 100+ = 80%+ PERFECT ONLY\nTP1 1:1 50% | TP2 1:2 30% | TP3 1:3 20%\n👀 Hunting update every 1h if no signal")
+    send_telegram("✅ *V26.4 SNIPER CLOUD is LIVE*\n12 Pairs | Score 88+ /125 (70%+) ONLY | TP1/TP2/TP3 | Order Type Auto\nEMA 30 + BOS 30 + FVG 25 + BONUS 40 = 125\n🔥 88+ = 70%+ SNIPER ONLY\nTP1 1:1 50% | TP2 1:2 30% | TP3 1:3 20%\n👀 Hunting update every 1h if no signal")
     sent = set()
     last_hunt_msg = time.time()
     while True:
@@ -235,7 +234,7 @@ def bot_loop():
             tz = pytz.timezone("Africa/Nairobi")
             now = dt.now(tz)
             last_activity = time.time()
-            print(f"V26.2 checking... EAT {now} | Checking 12 pairs | 100+ (80%+) ONLY", flush=True)
+            print(f"V26.4 checking... EAT {now} | Checking 12 pairs | 88+ /125 (70%+) ONLY", flush=True)
             found_this_round = 0
             best_score_this_round = 0
             best_pair_this_round = "None"
@@ -250,7 +249,7 @@ def bot_loop():
                         if key in sent:
                             continue
                         sent.add(key)
-                        msg = (f"🎯 *V26.2 {res['tier']} - Score {res['score']}/125 ({res['confidence']}%) *\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nOrder Type: {res['order_type']}\nLive Price: {res['live_price']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP1: {res['tp1']} (1:1 - Close 50%)\nTP2: {res['tp2']} (1:2 - Close 30%)\nTP3: {res['tp3']} (1:3 - Close 20% Runner)\n\n" + "\n".join(res['details']) + f"\n\n🛡️ *RISK RULES:*\nLot: 0.01 ONLY\nMove SL to BE when TP1 hits\nUNLIMITED - Only 80%+ Snipers")
+                        msg = (f"🎯 *V26.4 {res['tier']} - Score {res['score']}/125 ({res['confidence']}%) *\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nOrder Type: {res['order_type']}\nLive Price: {res['live_price']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP1: {res['tp1']} (1:1 - Close 50%)\nTP2: {res['tp2']} (1:2 - Close 30%)\nTP3: {res['tp3']} (1:3 - Close 20% Runner)\n\n" + "\n".join(res['details']) + f"\n\n🛡️ *RISK RULES:*\nLot: 0.01 ONLY\nMove SL to BE when TP1 hits\nUNLIMITED - Only 70%+ Snipers")
                         send_telegram(msg)
                     else:
                         sc = res.get("score", 0) if res else 0
@@ -263,7 +262,7 @@ def bot_loop():
                 except Exception as e:
                     print(f"Error {name}: {e}", flush=True)
             if found_this_round == 0 and (time.time() - last_hunt_msg) >= 3600:
-                send_telegram(f"👀 *Still Hunting...*\n\nNo 80%+ setup yet. Bot is alive and checking 12 pairs.\nBest close this round: {best_pair_this_round} - {best_score_this_round}/125 ({round(best_score_this_round/125*100,1)}%)\nNext check in 3 mins. EAT {now.strftime('%H:%M')}")
+                send_telegram(f"👀 *Still Hunting...*\n\nNo 70%+ setup yet. Bot is alive and checking 12 pairs.\nBest close this round: {best_pair_this_round} - {best_score_this_round}/125 ({round(best_score_this_round/125*100,1)}%)\nNext check in 3 mins. EAT {now.strftime('%H:%M')}")
                 last_hunt_msg = time.time()
             gc.collect()
             print("Sleeping 180s...", flush=True)
@@ -276,5 +275,5 @@ if __name__ == "__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
-    print("V26.2 - Flask is now MAIN thread, Bot is background", flush=True)
+    print("V26.4 - Flask is now MAIN thread, Bot is background", flush=True)
     run_web()
