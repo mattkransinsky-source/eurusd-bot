@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 @app.route('/', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def home():
-    return "V22 ALIVE - Bot is running", 200
+    return "V23 ALIVE - Bot is running", 200
 
 @app.route('/health', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def health():
@@ -15,15 +15,15 @@ def health():
 
 @app.route('/<path:path>', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def catch_all(path):
-    return "V22 ALIVE - Bot is running", 200
+    return "V23 ALIVE - Bot is running", 200
 
 @app.errorhandler(404)
 def not_found(e):
-    return "V22 ALIVE - Bot is running", 200
+    return "V23 ALIVE - Bot is running", 200
 
 @app.errorhandler(405)
 def method_not_allowed(e):
-    return "V22 ALIVE - Bot is running", 200
+    return "V23 ALIVE - Bot is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -32,7 +32,7 @@ def run_web():
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-# V22 - 8 PAIRS, SCORE 75+ ONLY, UNLIMITED - RSI REMOVED, WICK SOFTENED
+# V23 - 8 PAIRS, TIERED, FVG 50% TOLERANCE
 SYMBOLS = {
     "XAUUSD": "GC=F",
     "EURUSD": "EURUSD=X",
@@ -123,7 +123,6 @@ def analyze(name, yahoo_sym):
     score += 20; details.append("1H BOS ✅ +20")
     prev_low = min(lows_15m[-20:-2])
     prev_high = max(highs_15m[-20:-2])
-    # V22: Check last 3 candles for sweep, 50% wick (was 60% on 1 candle)
     sweep_ok = False
     for idx in [-4, -3, -2]:
         sweep_c = df_15m.iloc[idx]
@@ -164,9 +163,10 @@ def analyze(name, yahoo_sym):
     if not fvg_found:
         return None
     current = closes_15m[-1]
-    if not (fvg_bottom - (fvg_top-fvg_bottom)*0.2 <= current <= fvg_top + (fvg_top-fvg_bottom)*0.2):
+    # V23: FVG tolerance 50% (was 20%)
+    if not (fvg_bottom - (fvg_top-fvg_bottom)*0.5 <= current <= fvg_top + (fvg_top-fvg_bottom)*0.5):
         return None
-    score += 15; details.append("FVG Retest ✅ +15")
+    score += 15; details.append("FVG Retest 50% Tol ✅ +15")
     ob_ok = False
     for j in range(5):
         if lows_1h[-5:][j] <= fvg_top and highs_1h[-5:][j] >= fvg_bottom:
@@ -189,18 +189,20 @@ def analyze(name, yahoo_sym):
         tp = entry - risk * 2
     if risk <= 0:
         return None
-    return {"symbol": name, "trend": trend, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp),5), "score": score, "details": details, "rsi": 0}
+    # Tier
+    tier = "🔥 PERFECT SNIPER" if score >= 85 else "⚡ GOOD SNIPER"
+    return {"symbol": name, "trend": trend, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp),5), "score": score, "details": details, "tier": tier}
 
 def bot_loop():
     global last_activity
-    send_telegram("✅ *V22 SNIPER CLOUD is LIVE*\n8 Pairs | Score 75+ ONLY | UNLIMITED Snipers\nEMA + BOS + Wick 50% + 15m BOS + FVG Retest + OB\nRSI REMOVED - More Signals, Same Quality\nMove SL to BE at +20 pips")
+    send_telegram("✅ *V23 SNIPER CLOUD is LIVE*\n8 Pairs | Score 75+ ONLY | UNLIMITED\nEMA + BOS + Wick 50% + 15m BOS + FVG 50% Tol + OB\n🔥 85+ PERFECT | ⚡ 75-84 GOOD\nMove SL to BE at +20 pips")
     sent = set()
     while True:
         try:
             tz = pytz.timezone("Africa/Nairobi")
             now = dt.now(tz)
             last_activity = time.time()
-            print(f"V22 checking... EAT {now} | Checking 8 pairs | 75+ ONLY UNLIMITED", flush=True)
+            print(f"V23 checking... EAT {now} | Checking 8 pairs | 75+ ONLY UNLIMITED", flush=True)
             for name, ysym in SYMBOLS.items():
                 try:
                     print(f"Checking {name}...", flush=True)
@@ -210,7 +212,8 @@ def bot_loop():
                         if key in sent:
                             continue
                         sent.add(key)
-                        msg = (f"🎯 *V22 SNIPER - Score {res['score']}/95*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\n\n" + "\n".join(res['details']) + "\n\n🛡️ *RISK RULES:*\nLot: 0.01 ONLY\nMove SL to Break-Even at +20 pips profit\nUNLIMITED - Only 75+ Snipers")
+                        be_rule = "Move SL to BE at +20 pips" if res['score'] >= 85 else "Move SL to BE FAST at +15 pips"
+                        msg = (f"🎯 *V23 {res['tier']} - Score {res['score']}/95*\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP: {res['tp']}\nRR: 1:2\n\n" + "\n".join(res['details']) + f"\n\n🛡️ *RISK RULES:*\nLot: 0.01 ONLY\n{be_rule}\nUNLIMITED - Only 75+ Snipers")
                         send_telegram(msg)
                     else:
                         print(f"{name}: No setup - score <75 or filter fail, skipping", flush=True)
@@ -227,5 +230,5 @@ if __name__ == "__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
-    print("V22 - Flask is now MAIN thread, Bot is background", flush=True)
+    print("V23 - Flask is now MAIN thread, Bot is background", flush=True)
     run_web()
