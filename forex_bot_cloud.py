@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 @app.route('/', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def home():
-    return "V26.4 ALIVE - Bot is running", 200
+    return "V28 ALIVE - Bot is running", 200
 
 @app.route('/health', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def health():
@@ -15,15 +15,15 @@ def health():
 
 @app.route('/<path:path>', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def catch_all(path):
-    return "V26.4 ALIVE - Bot is running", 200
+    return "V28 ALIVE - Bot is running", 200
 
 @app.errorhandler(404)
 def not_found(e):
-    return "V26.4 ALIVE - Bot is running", 200
+    return "V28 ALIVE - Bot is running", 200
 
 @app.errorhandler(405)
 def method_not_allowed(e):
-    return "V26.4 ALIVE - Bot is running", 200
+    return "V28 ALIVE - Bot is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -32,7 +32,7 @@ def run_web():
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-# V26.4 - 12 PAIRS, SCORE 88/125 = 70%+ ONLY, TP1/TP2/TP3, ORDER TYPE AUTO
+# V28 - 75/125 + 4H MAX TRADES ONLY
 SYMBOLS = {
     "XAUUSD": "GC=F",
     "XAGUSD": "SI=F",
@@ -117,7 +117,7 @@ def analyze(name, yahoo_sym):
     elif price < ema50 and price < ema200:
         trend = "SELL"; score += 30; details.append("EMA 50+200 ✅ +30")
     else:
-        return {"fail": True, "score": score, "reason": "EMA fail", "trend": "NONE"}
+        return {"fail": True, "score": score, "reason": "EMA fail - ranging", "trend": "NONE"}
     high_1h_prev = max(highs_1h[-20:-1])
     low_1h_prev = min(lows_1h[-20:-1])
     last_1h_close = closes_1h[-1]
@@ -125,7 +125,7 @@ def analyze(name, yahoo_sym):
     if bos_ok:
         score += 30; details.append("1H BOS ✅ +30")
     else:
-        details.append("1H BOS ❌ +0 - BOS optional now")
+        details.append("1H BOS ❌ +0")
     prev_low = min(lows_15m[-20:-2])
     prev_high = max(highs_15m[-20:-2])
     sweep_ok = False
@@ -160,6 +160,7 @@ def analyze(name, yahoo_sym):
         details.append("15m BOS ❌ +0")
     fvg_found = False
     fvg_top = fvg_bottom = 0
+    fvg_ok = False
     for i in range(len(df_15m)-15, len(df_15m)-2):
         h1 = highs_15m[i]; l1 = lows_15m[i]
         h3 = highs_15m[i+2]; l3 = lows_15m[i+2]
@@ -176,6 +177,7 @@ def analyze(name, yahoo_sym):
         details.append("FVG found but price not in retest ❌ +0")
     else:
         score += 25; details.append("FVG Retest 50% Tol ✅ +25")
+        fvg_ok = True
     ob_ok = False
     for j in range(5):
         if lows_1h[-5:][j] <= fvg_top and highs_1h[-5:][j] >= fvg_bottom:
@@ -185,13 +187,16 @@ def analyze(name, yahoo_sym):
     else:
         details.append("Order Block ❌ +0")
     print(f"{name} {trend} Score: {score}/125", flush=True)
-    # V26.4: TRUE 70%+ = 88/125
-    if score < 88:
-        return {"fail": True, "score": score, "reason": "Score <88 (70%+)", "trend": trend, "details": details}
+    if score < 75:
+        return {"fail": True, "score": score, "reason": "Score <75", "trend": trend, "details": details}
+    if not bos_ok and not fvg_ok:
+        return {"fail": True, "score": score, "reason": "Quality Gate FAIL - No BOS + No FVG", "trend": trend, "details": details}
     if fvg_found:
         entry = (fvg_top + fvg_bottom) / 2
     else:
         entry = current
+    if abs(entry - current) / current > 0.008:
+        return {"fail": True, "score": score, "reason": "Entry too far - chasing", "trend": trend, "details": details}
     if trend == "BUY":
         if abs(entry - current) < (current * 0.0002):
             order_type = "BUY MARKET - Buy Now"
@@ -209,24 +214,27 @@ def analyze(name, yahoo_sym):
     if trend == "BUY":
         sl = prev_low - (fvg_top - fvg_bottom)
         risk = entry - sl
-        tp1 = entry + risk * 1
-        tp2 = entry + risk * 2
-        tp3 = entry + risk * 3
+        # V28 4H MAX TPs - Smaller for fast hits
+        tp1 = entry + risk * 0.7
+        tp2 = entry + risk * 1.2
+        tp3 = entry + risk * 1.8
     else:
         sl = prev_high + (fvg_top - fvg_bottom)
         risk = sl - entry
-        tp1 = entry - risk * 1
-        tp2 = entry - risk * 2
-        tp3 = entry - risk * 3
+        tp1 = entry - risk * 0.7
+        tp2 = entry - risk * 1.2
+        tp3 = entry - risk * 1.8
     if risk <= 0:
         return {"fail": True, "score": score, "reason": "Risk <=0", "trend": trend}
+    if risk / entry > 0.015:
+        return {"fail": True, "score": score, "reason": "SL too wide", "trend": trend, "details": details}
     confidence = round((score / 125) * 100, 1)
-    tier = "🔥 70%+ SNIPER"
+    tier = "🔥 75+ SNIPER 4H"
     return {"symbol": name, "trend": trend, "order_type": order_type, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp1": round(float(tp1),5), "tp2": round(float(tp2),5), "tp3": round(float(tp3),5), "score": score, "confidence": confidence, "details": details, "tier": tier, "live_price": round(float(current),5)}
 
 def bot_loop():
     global last_activity
-    send_telegram("✅ *V26.4 SNIPER CLOUD is LIVE*\n12 Pairs | Score 88+ /125 (70%+) ONLY | TP1/TP2/TP3 | Order Type Auto\nEMA 30 + BOS 30 + FVG 25 + BONUS 40 = 125\n🔥 88+ = 70%+ SNIPER ONLY\nTP1 1:1 50% | TP2 1:2 30% | TP3 1:3 20%\n👀 Hunting update every 1h if no signal")
+    send_telegram("✅ *V28 SNIPER CLOUD is LIVE - 4H MAX*\n12 Pairs | Score 75+ /125 ONLY | TP1/TP2/TP3 | 4H MAX HOLD\nFIXES: London+NY Only | BOS or FVG Must Pass | No Chasing | SL Cap\nTP1 0.7R 50% | TP2 1.2R 30% | TP3 1.8R 20%\n⏰ CLOSE AFTER 4H IF NOT AT TP1\n👀 Hunting update every 1h if no signal")
     sent = set()
     last_hunt_msg = time.time()
     while True:
@@ -234,7 +242,15 @@ def bot_loop():
             tz = pytz.timezone("Africa/Nairobi")
             now = dt.now(tz)
             last_activity = time.time()
-            print(f"V26.4 checking... EAT {now} | Checking 12 pairs | 88+ /125 (70%+) ONLY", flush=True)
+            hour = now.hour
+            in_session = 10 <= hour < 23
+            print(f"V28 checking... EAT {now} | Session: {'ON' if in_session else 'OFF - Sleeping'} | 75+ /125 ONLY | 4H MAX", flush=True)
+            if not in_session:
+                if (time.time() - last_hunt_msg) >= 3600:
+                    send_telegram(f"😴 *Outside Session*\nBot sleeping - London/NY closed. Back at 10:00 EAT.\nTime now: {now.strftime('%H:%M')} EAT")
+                    last_hunt_msg = time.time()
+                time.sleep(180)
+                continue
             found_this_round = 0
             best_score_this_round = 0
             best_pair_this_round = "None"
@@ -249,7 +265,7 @@ def bot_loop():
                         if key in sent:
                             continue
                         sent.add(key)
-                        msg = (f"🎯 *V26.4 {res['tier']} - Score {res['score']}/125 ({res['confidence']}%) *\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nOrder Type: {res['order_type']}\nLive Price: {res['live_price']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP1: {res['tp1']} (1:1 - Close 50%)\nTP2: {res['tp2']} (1:2 - Close 30%)\nTP3: {res['tp3']} (1:3 - Close 20% Runner)\n\n" + "\n".join(res['details']) + f"\n\n🛡️ *RISK RULES:*\nLot: 0.01 ONLY\nMove SL to BE when TP1 hits\nUNLIMITED - Only 70%+ Snipers")
+                        msg = (f"🎯 *V28 {res['tier']} - Score {res['score']}/125 ({res['confidence']}%) *\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nOrder Type: {res['order_type']}\nLive Price: {res['live_price']}\nEntry: {res['entry']}\nSL: {res['sl']}\nTP1: {res['tp1']} (0.7R - Close 50%)\nTP2: {res['tp2']} (1.2R - Close 30%)\nTP3: {res['tp3']} (1.8R - Close 20% Runner)\n\n" + "\n".join(res['details']) + f"\n\n🛡️ *RISK RULES - 4H MAX:*\nLot: 0.01 ONLY\nMove SL to BE when TP1 hits\n⏰ MAX HOLD 4H - Close after 4h if not at TP1\n⏰ If LIMIT not filled in 4h, CANCEL it\nSession: London + NY Only")
                         send_telegram(msg)
                     else:
                         sc = res.get("score", 0) if res else 0
@@ -262,7 +278,7 @@ def bot_loop():
                 except Exception as e:
                     print(f"Error {name}: {e}", flush=True)
             if found_this_round == 0 and (time.time() - last_hunt_msg) >= 3600:
-                send_telegram(f"👀 *Still Hunting...*\n\nNo 70%+ setup yet. Bot is alive and checking 12 pairs.\nBest close this round: {best_pair_this_round} - {best_score_this_round}/125 ({round(best_score_this_round/125*100,1)}%)\nNext check in 3 mins. EAT {now.strftime('%H:%M')}")
+                send_telegram(f"👀 *Still Hunting...*\n\nNo 75+ quality setup yet. Bot is alive and checking 12 pairs.\nBest close this round: {best_pair_this_round} - {best_score_this_round}/125 ({round(best_score_this_round/125*100,1)}%)\nNext check in 3 mins. EAT {now.strftime('%H:%M')}")
                 last_hunt_msg = time.time()
             gc.collect()
             print("Sleeping 180s...", flush=True)
@@ -275,5 +291,5 @@ if __name__ == "__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
-    print("V26.4 - Flask is now MAIN thread, Bot is background", flush=True)
+    print("V28 - Flask is now MAIN thread, Bot is background", flush=True)
     run_web()
