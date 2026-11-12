@@ -32,7 +32,6 @@ def run_web():
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-# V31 FINAL - 70/120, ONE TP, 24/7, RSI + 1H + ATR
 SYMBOLS = {
     "XAUUSD": "GC=F",
     "GBPJPY": "GBPJPY=X",
@@ -132,7 +131,6 @@ def analyze(name, yahoo_sym):
     score = 0
     details = []
 
-    # --- 1H TREND FILTER ---
     ema50_1h = ema(closes_1h, 50)
     ema20_1h = ema(closes_1h, 20)
     price_1h = closes_1h[-1]
@@ -142,7 +140,6 @@ def analyze(name, yahoo_sym):
     elif price_1h < ema50_1h and price_1h < ema20_1h:
         htf_trend = "SELL"
 
-    # --- 15m TREND ---
     ema50 = ema(closes_15m, 50)
     ema200 = ema(closes_15m, 20)
     price = closes_15m[-1]
@@ -161,7 +158,6 @@ def analyze(name, yahoo_sym):
     else:
         details.append(f"1H Neutral - allowing 15m {trend}")
 
-    # --- RSI FILTER ---
     rsi_15m = rsi(closes_15m, 14)
     if trend == "BUY" and rsi_15m > 70:
         return {"fail": True, "score": score, "reason": f"RSI Overbought {rsi_15m:.1f} - skip BUY", "trend": trend, "details": details}
@@ -238,28 +234,35 @@ def analyze(name, yahoo_sym):
         return {"fail": True, "score": score, "reason": "Score <70", "trend": trend, "details": details}
     if not bos_ok and not fvg_ok:
         return {"fail": True, "score": score, "reason": "Quality Gate FAIL - No BOS + No FVG", "trend": trend, "details": details}
+
+    # --- FIXED FAST ENTRY ---
+    # Old: entry = FVG mid, even if far away -> never fills
+    # New: if FVG mid is >0.15% away from live price, use live price = MARKET NOW
     if fvg_found:
-        entry = (fvg_top + fvg_bottom) / 2
+        fvg_mid = (fvg_top + fvg_bottom) / 2
+        dist = abs(fvg_mid - current) / current
+        if dist <= 0.0015:
+            entry = fvg_mid
+            entry_mode = "LIMIT - close to FVG"
+        else:
+            entry = current
+            entry_mode = "MARKET - FVG too far, entering now"
     else:
         entry = current
+        entry_mode = "MARKET - No FVG"
+
+    # If still chasing >0.8% - skip (too late)
     if abs(entry - current) / current > 0.008:
         return {"fail": True, "score": score, "reason": "Entry too far - chasing", "trend": trend, "details": details}
-    if trend == "BUY":
-        if abs(entry - current) < (current * 0.0002):
-            order_type = "BUY MARKET - Buy Now"
-        elif entry < current:
-            order_type = "BUY LIMIT"
-        else:
-            order_type = "BUY STOP"
-    else:
-        if abs(entry - current) < (current * 0.0002):
-            order_type = "SELL MARKET - Sell Now"
-        elif entry > current:
-            order_type = "SELL LIMIT"
-        else:
-            order_type = "SELL STOP"
 
-    # --- ATR SL ---
+    # MARKET if entry == live price, else LIMIT/STOP
+    if abs(entry - current) / current < 0.0002:
+        order_type = f"{trend} MARKET - Buy Now" if trend == "BUY" else f"{trend} MARKET - Sell Now"
+    elif trend == "BUY":
+        order_type = "BUY LIMIT" if entry < current else "BUY STOP"
+    else:
+        order_type = "SELL LIMIT" if entry > current else "SELL STOP"
+
     atr_val = atr(highs_5m, lows_5m, closes_5m, 14)
     if atr_val <= 0:
         atr_val = abs(entry * 0.001)
@@ -281,11 +284,11 @@ def analyze(name, yahoo_sym):
         return {"fail": True, "score": score, "reason": "SL too wide", "trend": trend, "details": details}
     confidence = round((score / 120) * 100, 1)
     tier = "🧠 SMART 70+"
-    return {"symbol": name, "trend": trend, "order_type": order_type, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp),5), "score": score, "confidence": confidence, "details": details, "tier": tier, "live_price": round(float(current),5), "rsi": round(float(rsi_15m),1), "htf": htf_trend}
+    return {"symbol": name, "trend": trend, "order_type": order_type, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp),5), "score": score, "confidence": confidence, "details": details, "tier": tier, "live_price": round(float(current),5), "rsi": round(float(rsi_15m),1), "htf": htf_trend, "entry_mode": entry_mode}
 
 def bot_loop():
     global last_activity
-    send_telegram("✅ *V31 SMART SCALPER is LIVE*\n5 Fast Pairs | 15m + 5m + 1H Filter | Score 70+ /120 | ONE TP ONLY 0.5R\nSMART: RSI + 1H Trend + ATR SL\nNO SESSION FILTER - Running 24/7\n⚡ MAX HOLD: 1 HOUR\n👀 Hunting every 1 min")
+    send_telegram("✅ *V31.1 FAST ENTRY is LIVE*\n5 Pairs | 15m + 5m + 1H | Score 70+ /120 | ONE TP 0.5R\nFIXED: Entry = Live Price if FVG too far - No more waiting!\nSMART: RSI + 1H + ATR SL | 24/7\n⚡ MAX HOLD: 1 HOUR\n👀 Hunting every 1 min")
     sent = set()
     last_hunt_msg = time.time()
     last_sent_time = {}
@@ -294,7 +297,7 @@ def bot_loop():
             tz = pytz.timezone("Africa/Nairobi")
             now = dt.now(tz)
             last_activity = time.time()
-            print(f"V31 SMART checking... EAT {now} | 24/7 ON | 70+ /120", flush=True)
+            print(f"V31.1 checking... EAT {now} | 24/7 ON | 70+ /120", flush=True)
             found_this_round = 0
             best_score_this_round = 0
             best_pair_this_round = "None"
@@ -314,7 +317,7 @@ def bot_loop():
                             continue
                         sent.add(key)
                         last_sent_time[cool_key] = time.time()
-                        msg = (f"🧠 *V31 {res['tier']} - Score {res['score']}/120 ({res['confidence']}%) *\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nOrder Type: {res['order_type']}\nLive Price: {res['live_price']}\nEntry: {res['entry']}\nSL: {res['sl']} (ATR 1.5x)\nTP: {res['tp']} (0.5R - Close 100%)\nRSI: {res['rsi']} | 1H Trend: {res['htf']}\n\n" + "\n".join(res['details']) + f"\n\n🛡️ *SCALP RULES:*\nLot: 0.01 ONLY\n⏰ MAX HOLD 1H - Close after 1h if not at TP\n⏰ If LIMIT not filled in 30 mins, CANCEL it\nRunning 24/7 - No Session Filter")
+                        msg = (f"🧠 *V31 {res['tier']} - Score {res['score']}/120 ({res['confidence']}%) *\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nOrder Type: {res['order_type']}\nEntry Mode: {res['entry_mode']}\nLive Price: {res['live_price']}\nEntry: {res['entry']}\nSL: {res['sl']} (ATR 1.5x)\nTP: {res['tp']} (0.5R - Close 100%)\nRSI: {res['rsi']} | 1H Trend: {res['htf']}\n\n" + "\n".join(res['details']) + f"\n\n🛡️ *SCALP RULES:*\nLot: 0.01 ONLY\n⏰ MAX HOLD 1H - Close after 1h if not at TP\n⏰ If LIMIT not filled in 15 mins, CANCEL it\nRunning 24/7")
                         send_telegram(msg)
                     else:
                         sc = res.get("score", 0) if res else 0
@@ -340,5 +343,5 @@ if __name__ == "__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
-    print("V31 SMART SCALPER - Flask is now MAIN thread, Bot is background", flush=True)
+    print("V31.1 FAST ENTRY - Flask is now MAIN thread, Bot is background", flush=True)
     run_web()
