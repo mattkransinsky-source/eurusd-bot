@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 @app.route('/', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def home():
-    return "V34.3 SHARP-OB ALIVE", 200
+    return "V34.4 SILENT-FIX ALIVE", 200
 
 @app.route('/health', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def health():
@@ -15,15 +15,15 @@ def health():
 
 @app.route('/<path:path>', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def catch_all(path):
-    return "V34.3 SHARP-OB ALIVE", 200
+    return "V34.4 SILENT-FIX ALIVE", 200
 
 @app.errorhandler(404)
 def not_found(e):
-    return "V34.3 SHARP-OB ALIVE", 200
+    return "V34.4 SILENT-FIX ALIVE", 200
 
 @app.errorhandler(405)
 def method_not_allowed(e):
-    return "V34.3 SHARP-OB ALIVE", 200
+    return "V34.4 SILENT-FIX ALIVE", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -119,38 +119,26 @@ def get_data(yahoo_symbol, interval, period="2d"):
         print(f"yfinance error {yahoo_symbol} {interval}: {e}", flush=True)
         return None
 
-# --- V34.3 ORDER BLOCK ENGINE ---
 def find_order_blocks(df_5m, trend):
-    """
-    Returns list of OBs: {type, top, bottom, mid, idx, fresh, taps}
-    Types: BULL_OB, BEAR_OB, BREAKER_BEAR, BREAKER_BULL, MITIGATION
-    """
     highs = df_5m['High'].tolist()
     lows = df_5m['Low'].tolist()
     closes = df_5m['Close'].tolist()
     opens = df_5m['Open'].tolist()
     obs = []
     n = len(df_5m)
-    # Scan last 30 closed candles for BOS + OB
     for i in range(max(5, n-30), n-3):
-        # Bullish BOS: close breaks above last 5 highs
         if closes[i] > max(highs[i-5:i]):
-            # Bullish OB = last bearish candle before BOS
             for j in range(i-1, max(i-5, 0), -1):
-                if closes[j] < opens[j]:  # bearish candle
+                if closes[j] < opens[j]:
                     top, bottom = highs[j], lows[j]
-                    # Check if OB still valid or broken?
-                    # If price later closed below bottom -> it became Breaker
                     broken = False
                     for k in range(j+1, n):
                         if closes[k] < bottom:
                             broken = True
                             break
                     if broken and trend == "SELL":
-                        # Bull OB broken -> now Bearish Breaker (resistance)
                         obs.append({"type": "BREAKER_BEAR", "top": top, "bottom": bottom, "mid": (top+bottom)/2, "idx": j, "fresh": (n-j) < 12})
                     elif not broken and trend == "BUY":
-                        # Count taps
                         taps = 0
                         for k in range(j+1, n):
                             if bottom <= lows[k] <= top:
@@ -158,10 +146,9 @@ def find_order_blocks(df_5m, trend):
                         ob_type = "MITIGATION_BULL" if taps >= 1 else "BULL_OB"
                         obs.append({"type": ob_type, "top": top, "bottom": bottom, "mid": (top+bottom)/2, "idx": j, "fresh": (n-j) < 12, "taps": taps})
                     break
-        # Bearish BOS: close breaks below last 5 lows
         if closes[i] < min(lows[i-5:i]):
             for j in range(i-1, max(i-5, 0), -1):
-                if closes[j] > opens[j]:  # bullish candle
+                if closes[j] > opens[j]:
                     top, bottom = highs[j], lows[j]
                     broken = False
                     for k in range(j+1, n):
@@ -181,9 +168,10 @@ def find_order_blocks(df_5m, trend):
     return obs
 
 def analyze(name, yahoo_sym):
-    df_4h = get_data(yahoo_sym, "4h", "10d")
-    df_1h = get_data(yahoo_sym, "1h", "5d")
-    df_15m = get_data(yahoo_sym, "15m", "2d")
+    # V34.4 FIX: Enough history for EMA200
+    df_4h = get_data(yahoo_sym, "4h", "30d")
+    df_1h = get_data(yahoo_sym, "1h", "10d")
+    df_15m = get_data(yahoo_sym, "15m", "5d")
     df_5m = get_data(yahoo_sym, "5m", "2d")
     if df_15m is None or df_5m is None or df_1h is None or df_4h is None:
         return {"fail": True, "score": 0, "reason": "No data"}
@@ -223,16 +211,18 @@ def analyze(name, yahoo_sym):
     elif price_1h < ema50_1h and price_1h < ema20_1h:
         htf_trend = "SELL"
 
+    # V34.4: EMA200 confirmation, not hard block if data short
     ema50 = ema(closes_15m, 50)
     ema200 = ema(closes_15m, 200)
     price = closes_15m[-1]
     trend = None
-    if price > ema50 and price > ema200:
-        trend = "BUY"; score += 30; details.append("15m EMA 50+200 ✅ +30")
-    elif price < ema50 and price < ema200:
-        trend = "SELL"; score += 30; details.append("15m EMA 50+200 ✅ +30")
+    ema200_ok = len(closes_15m) >= 210
+    if price > ema50 and (price > ema200 or not ema200_ok):
+        trend = "BUY"; score += 30; details.append("15m EMA 50+200 ✅ +30" if ema200_ok else "15m EMA 50 ✅ +30 (EMA200 short data)")
+    elif price < ema50 and (price < ema200 or not ema200_ok):
+        trend = "SELL"; score += 30; details.append("15m EMA 50+200 ✅ +30" if ema200_ok else "15m EMA 50 ✅ +30 (EMA200 short data)")
     else:
-        return {"fail": True, "score": score, "reason": "EMA fail - ranging", "trend": "NONE"}
+        return {"fail": True, "score": score, "reason": f"EMA fail - price {price:.5f} vs EMA50 {ema50:.5f} EMA200 {ema200:.5f}", "trend": "NONE"}
 
     htf_conflict = False
     if htf_trend is not None and htf_trend != trend:
@@ -259,12 +249,9 @@ def analyze(name, yahoo_sym):
         return {"fail": True, "score": score, "reason": f"RSI Extreme {rsi_15m:.1f}", "trend": trend, "details": details}
     if trend == "SELL" and rsi_15m < 25:
         return {"fail": True, "score": score, "reason": f"RSI Extreme {rsi_15m:.1f}", "trend": trend, "details": details}
-    chase_rsi = False
     if trend == "BUY" and rsi_15m > 60:
-        chase_rsi = True
         warnings.append(f"RSI {rsi_15m:.1f} high")
     if trend == "SELL" and rsi_15m < 40:
-        chase_rsi = True
         warnings.append(f"RSI {rsi_15m:.1f} low")
     details.append(f"RSI {rsi_15m:.1f} ✅")
 
@@ -299,7 +286,6 @@ def analyze(name, yahoo_sym):
         warnings.append("EXHAUSTED")
         details.append("⚠️ EXHAUSTION - 3 big candles")
 
-    # --- BOS 15m ---
     high_15m_prev = max(highs_15m[-20:-1])
     low_15m_prev = min(lows_15m[-20:-1])
     last_15m_close = closes_15m[-1]
@@ -309,7 +295,6 @@ def analyze(name, yahoo_sym):
     else:
         details.append("15m BOS ❌ +0")
 
-    # --- Wick Sweep ---
     prev_low = min(lows_5m[-20:-2])
     prev_high = max(highs_5m[-20:-2])
     sweep_ok = False
@@ -344,7 +329,6 @@ def analyze(name, yahoo_sym):
     else:
         details.append("5m BOS ❌ +0")
 
-    # --- FVG ---
     fvg_found = False
     fvg_top = fvg_bottom = 0
     fvg_ok = False
@@ -372,7 +356,6 @@ def analyze(name, yahoo_sym):
     else:
         details.append("FVG ❌ +0 - No fresh FVG")
 
-    # --- V34.3 ORDER BLOCKS ---
     obs = find_order_blocks(df_5m, trend)
     ob_ok = False
     ob_type = "None"
@@ -381,12 +364,10 @@ def analyze(name, yahoo_sym):
     ob_inside = False
     ob_quality = "Weak"
     if obs:
-        # Pick nearest OB to current price that is in signal direction
         best_ob = None
         best_dist = 99999
         for o in obs:
             dist = abs(o["mid"] - current)
-            # For BUY, OB should be at or below price (pullback zone). For SELL, at or above.
             if trend == "BUY" and o["mid"] > current + atr_val * 0.5:
                 continue
             if trend == "SELL" and o["mid"] < current - atr_val * 0.5:
@@ -400,13 +381,12 @@ def analyze(name, yahoo_sym):
             ob_top, ob_bottom, ob_mid = best_ob["top"], best_ob["bottom"], best_ob["mid"]
             ob_fresh = best_ob.get("fresh", False)
             ob_inside = ob_bottom <= current <= ob_top
-            # Quality: Fresh + Breaker/Mitigation = strongest
             if "BREAKER" in ob_type:
                 score += 30; ob_quality = "STRONG - Breaker"
-                details.append(f"🔥 BREAKER {ob_type} ✅ +30 - Old OB flipped, sharpest")
+                details.append(f"🔥 BREAKER {ob_type} ✅ +30")
             elif "MITIGATION" in ob_type:
                 score += 28; ob_quality = "STRONG - Mitigation 2nd tap"
-                details.append(f"🔥 MITIGATION {ob_type} ✅ +28 - 2nd tap, sharp re-entry")
+                details.append(f"🔥 MITIGATION {ob_type} ✅ +28")
             elif ob_fresh:
                 score += 25; ob_quality = "FRESH OB"
                 details.append(f"OB {ob_type} FRESH ✅ +25 - {ob_bottom:.5f}-{ob_top:.5f}")
@@ -418,7 +398,6 @@ def analyze(name, yahoo_sym):
     else:
         details.append("OB ❌ +0 - No OB found")
 
-    # Rejection
     last_c = df_5m.iloc[-1]
     last_rng = last_c['High'] - last_c['Low']
     rejection_ok = False
@@ -437,30 +416,29 @@ def analyze(name, yahoo_sym):
         details.append("Rejection ❌ +0")
 
     print(f"{name} {trend} Score: {score}/180 RSI:{rsi_15m:.1f} OB:{ob_type} FVG:{fvg_ok}", flush=True)
-    if score < 60:
-        return {"fail": True, "score": score, "reason": "Score <60", "trend": trend, "details": details}
+    # V34.4: Lower threshold to restore volume
+    if score < 50:
+        return {"fail": True, "score": score, "reason": "Score <50", "trend": trend, "details": details}
 
-    # --- TIER: Now with OB ---
+    # V34.4: Relaxed tiers - OB OR FVG is enough to send
     confluence = sum([1 for x in [bos_ok, sweep_ok, fvg_ok, ob_ok] if x])
-    if confluence >= 3 and not chase and not exhausted and not htf_conflict and not htf4_conflict and (fvg_inside or ob_inside) and rejection_ok:
+    if confluence >= 3 and not chase and not exhausted and (fvg_inside or ob_inside) and rejection_ok:
         tier = "🔥 A+ SHARP OB"
         tier_label = "A+"
         take_it = "✅ YES - Take it"
-    elif confluence >= 3 and not chase:
+    elif confluence >= 2:
         tier = "✅ A - GOOD OB"
         tier_label = "A"
         take_it = "✅ YES - Take it, 0.01 only"
-    elif confluence >= 2:
-        tier = "⚠️ A- CHASE / WATCH"
+    elif confluence >= 1 and (fvg_ok or ob_ok):
+        tier = "⚠️ A- WATCH"
         tier_label = "A-"
-        take_it = "⚠️ WAIT - Use LIMIT only"
+        take_it = "⚠️ WAIT - Use LIMIT only, don't market"
     else:
         tier = "👀 WATCH ONLY"
         tier_label = "WATCH"
-        take_it = "❌ NO - Watch only"
+        take_it = "❌ NO - Watch only, wait for pullback"
 
-    # --- SHARP ENTRY: Choose best zone - OB Mid preferred if closer, else FVG Mid ---
-    # If both exist, pick the one price is closest to / inside
     entry = None
     entry_type = "FVG"
     if ob_ok and fvg_found:
@@ -483,17 +461,12 @@ def analyze(name, yahoo_sym):
     else:
         order_type = "SELL LIMIT"
 
-    # --- SL = Invalidation (OB low/high) OR ATR, whichever tighter but logical ---
-    # V34.3: SL at OB edge + small buffer, capped by ATR 1.2x
     if trend == "BUY":
-        # Invalidation = below OB bottom or FVG bottom
         inval = ob_bottom if ob_ok else (fvg_bottom if fvg_found else entry - atr_val)
         sl_inval = inval - atr_val * 0.2
         sl_atr = entry - atr_val * 1.0
-        # Use the tighter of the two but not above entry - 0.2 ATR
-        sl = max(sl_inval, sl_atr)  # tighter = higher SL for BUY
+        sl = max(sl_inval, sl_atr)
         risk = entry - sl
-        # If risk too small, expand to ATR 0.8x min
         if risk < atr_val * 0.5:
             sl = entry - atr_val * 0.8
             risk = entry - sl
@@ -515,7 +488,6 @@ def analyze(name, yahoo_sym):
     if risk / entry > 0.01:
         return {"fail": True, "score": score, "reason": "SL too wide", "trend": trend, "details": details}
 
-    # Dual TP
     if trend == "BUY":
         tp1 = entry + risk * 1.0
         tp2 = entry + risk * 2.0
@@ -526,4 +498,13 @@ def analyze(name, yahoo_sym):
     confidence = round((score / 180) * 100, 1)
     be_price = entry + risk * 0.5 if trend == "BUY" else entry - risk * 0.5
     inval_price = round(float(sl),5)
-    return {"symbol": name
+    return {"symbol": name, "trend": trend, "order_type": order_type, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp2),5), "tp1": round(float(tp1),5), "tp2": round(float(tp2),5), "score": score, "confidence": confidence, "details": details, "tier": tier, "tier_label": tier_label, "take_it": take_it, "live_price": round(float(current),5), "rsi": round(float(rsi_15m),1), "htf": htf_trend, "htf4": htf4_trend, "entry_mode": entry_mode, "be_price": round(float(be_price),5), "risk": round(float(risk),5), "warnings": warnings, "chase": chase, "fvg_inside": fvg_inside, "rejection": rejection_ok, "ob_type": ob_type, "ob_quality": ob_quality, "entry_type": entry_type, "ob_top": round(float(ob_top),5) if ob_ok else 0, "ob_bottom": round(float(ob_bottom),5) if ob_ok else 0, "inval": inval_price}
+
+def bot_loop():
+    global last_activity
+    send_telegram("✅ *V34.4 SILENT-FIX LIVE*\n5 Pairs | Score 50+ /180 | Dual TP 1R + 2R\n🔥 OBs: Bull | Bear | Breaker | Mitigation | FVG\n🎯 TIERS: A+ = Take | A = Take 0.01 | A- = LIMIT only | WATCH = Don't take\n🛡️ SL = OB Invalidation | BE at 0.5R\n⏰ SESSION: 09-21 EAT | GOLD 11-19 EAT")
+    sent = set()
+    last_hunt_msg = time.time()
+    last_sent_time = {}
+    last_debug_msg = time.time()
+   
