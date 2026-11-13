@@ -39,6 +39,15 @@ SYMBOLS = {
     "GBPUSD": "GBPUSD=X",
     "EURUSD": "EURUSD=X",
 }
+# MAX SL DISTANCE - ATR CAP - if SL bigger than this, SKIP trade
+# This stops -$16 Gold losses. Max loss on 0.01 = ~$8 on Gold, ~$6-8 on others
+MAX_RISK = {
+    "XAUUSD": 8.0,
+    "GBPJPY": 1.2,
+    "US30": 120.0,
+    "GBPUSD": 0.008,
+    "EURUSD": 0.008,
+}
 
 last_activity = time.time()
 
@@ -113,16 +122,18 @@ def get_data(yahoo_symbol, interval, period="2d"):
         return None
 
 def analyze(name, yahoo_sym):
+    df_4h = get_data(yahoo_sym, "4h", "10d")
     df_1h = get_data(yahoo_sym, "1h", "5d")
     df_15m = get_data(yahoo_sym, "15m", "2d")
     df_5m = get_data(yahoo_sym, "5m", "2d")
-    if df_15m is None or df_5m is None or df_1h is None:
+    if df_15m is None or df_5m is None or df_1h is None or df_4h is None:
         return {"fail": True, "score": 0, "reason": "No data"}
-    if len(df_5m) < 50 or len(df_15m) < 50 or len(df_1h) < 20:
+    if len(df_5m) < 50 or len(df_15m) < 50 or len(df_1h) < 20 or len(df_4h) < 20:
         return {"fail": True, "score": 0, "reason": "Not enough candles"}
     closes_15m = df_15m['Close'].tolist()
     closes_5m = df_5m['Close'].tolist()
     closes_1h = df_1h['Close'].tolist()
+    closes_4h = df_4h['Close'].tolist()
     highs_5m = df_5m['High'].tolist()
     lows_5m = df_5m['Low'].tolist()
     highs_15m = df_15m['High'].tolist()
@@ -130,6 +141,16 @@ def analyze(name, yahoo_sym):
 
     score = 0
     details = []
+
+    # --- 4H FILTER - NEW OPTION C ---
+    ema50_4h = ema(closes_4h, 50)
+    ema20_4h = ema(closes_4h, 20)
+    price_4h = closes_4h[-1]
+    htf4_trend = None
+    if price_4h > ema50_4h and price_4h > ema20_4h:
+        htf4_trend = "BUY"
+    elif price_4h < ema50_4h and price_4h < ema20_4h:
+        htf4_trend = "SELL"
 
     ema50_1h = ema(closes_1h, 50)
     ema20_1h = ema(closes_1h, 20)
@@ -151,12 +172,19 @@ def analyze(name, yahoo_sym):
     else:
         return {"fail": True, "score": score, "reason": "EMA fail - ranging", "trend": "NONE"}
 
+    # 1H + 4H must agree with 15m - if they conflict, SKIP
     if htf_trend is not None and htf_trend != trend:
         return {"fail": True, "score": score, "reason": f"1H Trend Conflict - 1H {htf_trend} vs 15m {trend}", "trend": trend, "details": details}
+    if htf4_trend is not None and htf4_trend != trend:
+        return {"fail": True, "score": score, "reason": f"4H Trend Conflict - 4H {htf4_trend} vs 15m {trend}", "trend": trend, "details": details}
     if htf_trend == trend:
         details.append(f"1H Trend Agrees ✅ {htf_trend}")
     else:
         details.append(f"1H Neutral - allowing 15m {trend}")
+    if htf4_trend == trend:
+        details.append(f"4H Trend Agrees ✅ {htf4_trend}")
+    else:
+        details.append(f"4H Neutral - allowing 15m {trend}")
 
     rsi_15m = rsi(closes_15m, 14)
     if trend == "BUY" and rsi_15m > 70:
@@ -229,15 +257,13 @@ def analyze(name, yahoo_sym):
         score += 25; details.append("FVG Retest 50% Tol ✅ +25")
         fvg_ok = True
 
-    print(f"{name} {trend} Score: {score}/120 RSI:{rsi_15m:.1f} 1H:{htf_trend}", flush=True)
+    print(f"{name} {trend} Score: {score}/120 RSI:{rsi_15m:.1f} 1H:{htf_trend} 4H:{htf4_trend}", flush=True)
     if score < 70:
         return {"fail": True, "score": score, "reason": "Score <70", "trend": trend, "details": details}
-    if not bos_ok and not fvg_ok:
-        return {"fail": True, "score": score, "reason": "Quality Gate FAIL - No BOS + No FVG", "trend": trend, "details": details}
+    # --- OPTION C: REQUIRE BOTH BOS + FVG ---
+    if not bos_ok or not fvg_ok:
+        return {"fail": True, "score": score, "reason": "Quality Gate FAIL - Need BOTH BOS + FVG (Option C)", "trend": trend, "details": details}
 
-    # --- FIXED FAST ENTRY ---
-    # Old: entry = FVG mid, even if far away -> never fills
-    # New: if FVG mid is >0.15% away from live price, use live price = MARKET NOW
     if fvg_found:
         fvg_mid = (fvg_top + fvg_bottom) / 2
         dist = abs(fvg_mid - current) / current
@@ -251,11 +277,9 @@ def analyze(name, yahoo_sym):
         entry = current
         entry_mode = "MARKET - No FVG"
 
-    # If still chasing >0.8% - skip (too late)
     if abs(entry - current) / current > 0.008:
         return {"fail": True, "score": score, "reason": "Entry too far - chasing", "trend": trend, "details": details}
 
-    # MARKET if entry == live price, else LIMIT/STOP
     if abs(entry - current) / current < 0.0002:
         order_type = f"{trend} MARKET - Buy Now" if trend == "BUY" else f"{trend} MARKET - Sell Now"
     elif trend == "BUY":
@@ -280,15 +304,21 @@ def analyze(name, yahoo_sym):
         tp = entry - risk * 0.5
     if risk <= 0:
         return {"fail": True, "score": score, "reason": "Risk <=0", "trend": trend}
+    # --- ATR / SL CAP - OPTION C ---
+    max_risk = MAX_RISK.get(name, 9999)
+    if risk > max_risk:
+        return {"fail": True, "score": score, "reason": f"SL Cap - Risk {risk:.5f} > Max {max_risk} - Volatile, skip", "trend": trend, "details": details}
     if risk / entry > 0.015:
         return {"fail": True, "score": score, "reason": "SL too wide", "trend": trend, "details": details}
     confidence = round((score / 120) * 100, 1)
     tier = "🧠 SMART 70+"
-    return {"symbol": name, "trend": trend, "order_type": order_type, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp),5), "score": score, "confidence": confidence, "details": details, "tier": tier, "live_price": round(float(current),5), "rsi": round(float(rsi_15m),1), "htf": htf_trend, "entry_mode": entry_mode}
+    # Breakeven price = Entry + 0.2R profit (approx +$2 on 0.01 for Gold)
+    be_price = entry + risk * 0.2 if trend == "BUY" else entry - risk * 0.2
+    return {"symbol": name, "trend": trend, "order_type": order_type, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp),5), "score": score, "confidence": confidence, "details": details, "tier": tier, "live_price": round(float(current),5), "rsi": round(float(rsi_15m),1), "htf": htf_trend, "htf4": htf4_trend, "entry_mode": entry_mode, "be_price": round(float(be_price),5), "risk": round(float(risk),5)}
 
 def bot_loop():
     global last_activity
-    send_telegram("✅ *V31.1 FAST ENTRY is LIVE*\n5 Pairs | 15m + 5m + 1H | Score 70+ /120 | ONE TP 0.5R\nFIXED: Entry = Live Price if FVG too far - No more waiting!\nSMART: RSI + 1H + ATR SL | 24/7\n⚡ MAX HOLD: 1 HOUR\n👀 Hunting every 1 min")
+    send_telegram("✅ *V32 SAFE - OPTION C is LIVE*\n5 Pairs | 15m + 5m + 1H + 4H | Score 70+ /120 | ONE TP 0.5R\n🛡️ NEW: BOS+FVG BOTH Required | SL Cap | 4H Filter | Breakeven\n⏰ SESSION: 09-21 EAT | GOLD ONLY 11-19 EAT\n👀 Hunting every 1 min in session")
     sent = set()
     last_hunt_msg = time.time()
     last_sent_time = {}
@@ -297,12 +327,22 @@ def bot_loop():
             tz = pytz.timezone("Africa/Nairobi")
             now = dt.now(tz)
             last_activity = time.time()
-            print(f"V31.1 checking... EAT {now} | 24/7 ON | 70+ /120", flush=True)
+            hour = now.hour + now.minute / 60.0
+            in_session = 9.0 <= hour < 21.0
+            if not in_session:
+                print(f"OUT OF SESSION - EAT {now} - sleeping, no signals", flush=True)
+                time.sleep(60)
+                continue
+            print(f"V32 checking... EAT {now} | SESSION ON 09-21 | 70+ /120 | OPTION C", flush=True)
             found_this_round = 0
             best_score_this_round = 0
             best_pair_this_round = "None"
             for name, ysym in SYMBOLS.items():
                 try:
+                    # GOLD ONLY 11-19 EAT - OPTION C
+                    if name == "XAUUSD" and not (11.0 <= hour < 19.0):
+                        print(f"{name}: Skipped - Gold only 11-19 EAT", flush=True)
+                        continue
                     print(f"Checking {name}...", flush=True)
                     res = analyze(name, ysym)
                     if res and not res.get("fail"):
@@ -317,7 +357,7 @@ def bot_loop():
                             continue
                         sent.add(key)
                         last_sent_time[cool_key] = time.time()
-                        msg = (f"🧠 *V31 {res['tier']} - Score {res['score']}/120 ({res['confidence']}%) *\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nOrder Type: {res['order_type']}\nEntry Mode: {res['entry_mode']}\nLive Price: {res['live_price']}\nEntry: {res['entry']}\nSL: {res['sl']} (ATR 1.5x)\nTP: {res['tp']} (0.5R - Close 100%)\nRSI: {res['rsi']} | 1H Trend: {res['htf']}\n\n" + "\n".join(res['details']) + f"\n\n🛡️ *SCALP RULES:*\nLot: 0.01 ONLY\n⏰ MAX HOLD 1H - Close after 1h if not at TP\n⏰ If LIMIT not filled in 15 mins, CANCEL it\nRunning 24/7")
+                        msg = (f"🧠 *V32 {res['tier']} - Score {res['score']}/120 ({res['confidence']}%) *\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nOrder Type: {res['order_type']}\nEntry Mode: {res['entry_mode']}\nLive Price: {res['live_price']}\nEntry: {res['entry']}\nSL: {res['sl']} (ATR 1.5x + Capped)\nTP: {res['tp']} (0.5R - Close 100%)\nRSI: {res['rsi']} | 1H: {res['htf']} | 4H: {res['htf4']}\n\n" + "\n".join(res['details']) + f"\n\n🛡️ *SAFE RULES - OPTION C:*\nLot: 0.01 ONLY\n✅ BREAKEVEN: When price hits {res['be_price']}, MOVE SL TO ENTRY! Then you can't lose.\n⏰ MAX HOLD 1H - Close after 1h if not at TP\n⏰ If LIMIT not filled in 15 mins, CANCEL it\nSession: 09-21 EAT | Gold 11-19 EAT")
                         send_telegram(msg)
                     else:
                         sc = res.get("score", 0) if res else 0
@@ -330,7 +370,7 @@ def bot_loop():
                 except Exception as e:
                     print(f"Error {name}: {e}", flush=True)
             if found_this_round == 0 and (time.time() - last_hunt_msg) >= 1800:
-                send_telegram(f"👀 *Still Hunting Smart Scalps...*\n\nNo 70+ scalp yet. Checking 5 fast pairs.\nBest close: {best_pair_this_round} - {best_score_this_round}/120\nEAT {now.strftime('%H:%M')}")
+                send_telegram(f"👀 *Still Hunting Safe Scalps...*\n\nNo 70+ safe scalp yet. Checking 5 pairs.\nBest close: {best_pair_this_round} - {best_score_this_round}/120\nEAT {now.strftime('%H:%M')} | Session 09-21 EAT")
                 last_hunt_msg = time.time()
             gc.collect()
             print("Sleeping 60s...", flush=True)
@@ -343,5 +383,5 @@ if __name__ == "__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
-    print("V31.1 FAST ENTRY - Flask is now MAIN thread, Bot is background", flush=True)
+    print("V32 SAFE OPTION C - Flask is now MAIN thread, Bot is background", flush=True)
     run_web()
