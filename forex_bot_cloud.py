@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 @app.route('/', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def home():
-    return "V34 SHARP ALIVE", 200
+    return "V34.3 SHARP-OB ALIVE", 200
 
 @app.route('/health', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def health():
@@ -15,15 +15,15 @@ def health():
 
 @app.route('/<path:path>', methods=['GET', 'HEAD', 'POST', 'OPTIONS'])
 def catch_all(path):
-    return "V34 SHARP ALIVE", 200
+    return "V34.3 SHARP-OB ALIVE", 200
 
 @app.errorhandler(404)
 def not_found(e):
-    return "V34 SHARP ALIVE", 200
+    return "V34.3 SHARP-OB ALIVE", 200
 
 @app.errorhandler(405)
 def method_not_allowed(e):
-    return "V34 SHARP ALIVE", 200
+    return "V34.3 SHARP-OB ALIVE", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -39,7 +39,6 @@ SYMBOLS = {
     "GBPUSD": "GBPUSD=X",
     "EURUSD": "EURUSD=X",
 }
-# V34: TIGHTER caps - Gold was killing account
 MAX_RISK = {
     "XAUUSD": 5.0,
     "GBPJPY": 0.8,
@@ -120,6 +119,67 @@ def get_data(yahoo_symbol, interval, period="2d"):
         print(f"yfinance error {yahoo_symbol} {interval}: {e}", flush=True)
         return None
 
+# --- V34.3 ORDER BLOCK ENGINE ---
+def find_order_blocks(df_5m, trend):
+    """
+    Returns list of OBs: {type, top, bottom, mid, idx, fresh, taps}
+    Types: BULL_OB, BEAR_OB, BREAKER_BEAR, BREAKER_BULL, MITIGATION
+    """
+    highs = df_5m['High'].tolist()
+    lows = df_5m['Low'].tolist()
+    closes = df_5m['Close'].tolist()
+    opens = df_5m['Open'].tolist()
+    obs = []
+    n = len(df_5m)
+    # Scan last 30 closed candles for BOS + OB
+    for i in range(max(5, n-30), n-3):
+        # Bullish BOS: close breaks above last 5 highs
+        if closes[i] > max(highs[i-5:i]):
+            # Bullish OB = last bearish candle before BOS
+            for j in range(i-1, max(i-5, 0), -1):
+                if closes[j] < opens[j]:  # bearish candle
+                    top, bottom = highs[j], lows[j]
+                    # Check if OB still valid or broken?
+                    # If price later closed below bottom -> it became Breaker
+                    broken = False
+                    for k in range(j+1, n):
+                        if closes[k] < bottom:
+                            broken = True
+                            break
+                    if broken and trend == "SELL":
+                        # Bull OB broken -> now Bearish Breaker (resistance)
+                        obs.append({"type": "BREAKER_BEAR", "top": top, "bottom": bottom, "mid": (top+bottom)/2, "idx": j, "fresh": (n-j) < 12})
+                    elif not broken and trend == "BUY":
+                        # Count taps
+                        taps = 0
+                        for k in range(j+1, n):
+                            if bottom <= lows[k] <= top:
+                                taps += 1
+                        ob_type = "MITIGATION_BULL" if taps >= 1 else "BULL_OB"
+                        obs.append({"type": ob_type, "top": top, "bottom": bottom, "mid": (top+bottom)/2, "idx": j, "fresh": (n-j) < 12, "taps": taps})
+                    break
+        # Bearish BOS: close breaks below last 5 lows
+        if closes[i] < min(lows[i-5:i]):
+            for j in range(i-1, max(i-5, 0), -1):
+                if closes[j] > opens[j]:  # bullish candle
+                    top, bottom = highs[j], lows[j]
+                    broken = False
+                    for k in range(j+1, n):
+                        if closes[k] > top:
+                            broken = True
+                            break
+                    if broken and trend == "BUY":
+                        obs.append({"type": "BREAKER_BULL", "top": top, "bottom": bottom, "mid": (top+bottom)/2, "idx": j, "fresh": (n-j) < 12})
+                    elif not broken and trend == "SELL":
+                        taps = 0
+                        for k in range(j+1, n):
+                            if bottom <= highs[k] <= top:
+                                taps += 1
+                        ob_type = "MITIGATION_BEAR" if taps >= 1 else "BEAR_OB"
+                        obs.append({"type": ob_type, "top": top, "bottom": bottom, "mid": (top+bottom)/2, "idx": j, "fresh": (n-j) < 12, "taps": taps})
+                    break
+    return obs
+
 def analyze(name, yahoo_sym):
     df_4h = get_data(yahoo_sym, "4h", "10d")
     df_1h = get_data(yahoo_sym, "1h", "5d")
@@ -129,7 +189,6 @@ def analyze(name, yahoo_sym):
         return {"fail": True, "score": 0, "reason": "No data"}
     if len(df_5m) < 50 or len(df_15m) < 50 or len(df_1h) < 20 or len(df_4h) < 20:
         return {"fail": True, "score": 0, "reason": "Not enough candles"}
-    # V34: Use CLOSED candles only - drop last unfinished candle to avoid false signals
     df_5m = df_5m.iloc[:-1]
     df_15m = df_15m.iloc[:-1]
 
@@ -144,8 +203,8 @@ def analyze(name, yahoo_sym):
 
     score = 0
     details = []
+    warnings = []
 
-    # --- HTF ---
     ema50_4h = ema(closes_4h, 50)
     ema20_4h = ema(closes_4h, 20)
     price_4h = closes_4h[-1]
@@ -164,7 +223,6 @@ def analyze(name, yahoo_sym):
     elif price_1h < ema50_1h and price_1h < ema20_1h:
         htf_trend = "SELL"
 
-    # --- 15m Trend - V34 FIX: Real EMA 200 ---
     ema50 = ema(closes_15m, 50)
     ema200 = ema(closes_15m, 200)
     price = closes_15m[-1]
@@ -174,51 +232,60 @@ def analyze(name, yahoo_sym):
     elif price < ema50 and price < ema200:
         trend = "SELL"; score += 30; details.append("15m EMA 50+200 ✅ +30")
     else:
-        return {"fail": True, "score": score, "reason": "EMA fail - ranging / price between EMAs", "trend": "NONE"}
+        return {"fail": True, "score": score, "reason": "EMA fail - ranging", "trend": "NONE"}
 
-    # V34: 1H MUST agree - no neutral pass
+    htf_conflict = False
     if htf_trend is not None and htf_trend != trend:
-        return {"fail": True, "score": score, "reason": f"1H Conflict - 1H {htf_trend} vs 15m {trend}", "trend": trend, "details": details}
-    if htf_trend == trend:
+        htf_conflict = True
+        warnings.append(f"1H Conflict {htf_trend}")
+        details.append(f"⚠️ 1H Conflict {htf_trend} vs {trend} - Grade down")
+    elif htf_trend == trend:
         details.append(f"1H Agrees ✅ {htf_trend}")
     else:
         details.append(f"1H Neutral - allowing 15m {trend}")
 
-    # V34: 4H BLOCKS again - no warning only
+    htf4_conflict = False
     if htf4_trend is not None and htf4_trend != trend:
-        return {"fail": True, "score": score, "reason": f"4H Conflict BLOCK - 4H {htf4_trend} vs 15m {trend}", "trend": trend, "details": details}
-    if htf4_trend == trend:
+        htf4_conflict = True
+        warnings.append(f"4H Conflict {htf4_trend}")
+        details.append(f"⚠️ 4H Conflict {htf4_trend} vs {trend} - Grade down")
+    elif htf4_trend == trend:
         details.append(f"4H Agrees ✅ {htf4_trend}")
     else:
         details.append(f"4H Neutral - allowing 15m {trend}")
 
     rsi_15m = rsi(closes_15m, 14)
-    if trend == "BUY" and rsi_15m > 70:
-        return {"fail": True, "score": score, "reason": f"RSI Overbought {rsi_15m:.1f} - skip BUY", "trend": trend, "details": details}
-    if trend == "SELL" and rsi_15m < 30:
-        return {"fail": True, "score": score, "reason": f"RSI Oversold {rsi_15m:.1f} - skip SELL", "trend": trend, "details": details}
-    # V34: Also block chasing into extreme RSI
+    if trend == "BUY" and rsi_15m > 75:
+        return {"fail": True, "score": score, "reason": f"RSI Extreme {rsi_15m:.1f}", "trend": trend, "details": details}
+    if trend == "SELL" and rsi_15m < 25:
+        return {"fail": True, "score": score, "reason": f"RSI Extreme {rsi_15m:.1f}", "trend": trend, "details": details}
+    chase_rsi = False
     if trend == "BUY" and rsi_15m > 60:
-        return {"fail": True, "score": score, "reason": f"RSI {rsi_15m:.1f} too high to BUY - already pumped", "trend": trend, "details": details}
+        chase_rsi = True
+        warnings.append(f"RSI {rsi_15m:.1f} high")
     if trend == "SELL" and rsi_15m < 40:
-        return {"fail": True, "score": score, "reason": f"RSI {rsi_15m:.1f} too low to SELL - already dumped", "trend": trend, "details": details}
-    details.append(f"RSI {rsi_15m:.1f} OK ✅")
+        chase_rsi = True
+        warnings.append(f"RSI {rsi_15m:.1f} low")
+    details.append(f"RSI {rsi_15m:.1f} ✅")
 
-    # --- ATR early for filters ---
     atr_val = atr(highs_5m, lows_5m, closes_5m, 14)
     if atr_val <= 0:
         atr_val = abs(price * 0.001)
 
-    # V34 SHARP: ANTI-CHASE + EXHAUSTION - The Opposite Fix
-    # If last 3 closed candles moved > 0.8x ATR in signal direction, move is done
     last3_move = closes_5m[-1] - closes_5m[-4]
+    chase = False
     if trend == "BUY" and last3_move > atr_val * 0.8:
-        return {"fail": True, "score": score, "reason": f"CHASE BLOCK - Already pumped {last3_move:.5f} > 0.8 ATR - wait for pullback", "trend": trend, "details": details}
-    if trend == "SELL" and last3_move < -atr_val * 0.8:
-        return {"fail": True, "score": score, "reason": f"CHASE BLOCK - Already dumped {last3_move:.5f} < -0.8 ATR - wait for pullback", "trend": trend, "details": details}
-    details.append(f"Anti-Chase ✅ Last3 move {last3_move:.5f} within ATR")
+        chase = True
+        warnings.append("CHASE - pumped")
+        details.append(f"⚠️ CHASE - Pumped {last3_move:.5f} > 0.8 ATR - Use LIMIT")
+    elif trend == "SELL" and last3_move < -atr_val * 0.8:
+        chase = True
+        warnings.append("CHASE - dumped")
+        details.append(f"⚠️ CHASE - Dumped {last3_move:.5f} - Use LIMIT")
+    else:
+        details.append(f"Anti-Chase ✅ Last3 {last3_move:.5f}")
 
-    # V34: 3 big candles same direction = exhausted
+    exhausted = False
     big_count = 0
     for i in range(-4, -1):
         rng = highs_5m[i] - lows_5m[i]
@@ -228,7 +295,9 @@ def analyze(name, yahoo_sym):
             if trend == "SELL" and closes_5m[i] < closes_5m[i-1]:
                 big_count += 1
     if big_count >= 3:
-        return {"fail": True, "score": score, "reason": "EXHAUSTION - 3 big candles in signal direction", "trend": trend, "details": details}
+        exhausted = True
+        warnings.append("EXHAUSTED")
+        details.append("⚠️ EXHAUSTION - 3 big candles")
 
     # --- BOS 15m ---
     high_15m_prev = max(highs_15m[-20:-1])
@@ -240,7 +309,7 @@ def analyze(name, yahoo_sym):
     else:
         details.append("15m BOS ❌ +0")
 
-    # --- Wick Sweep 5m ---
+    # --- Wick Sweep ---
     prev_low = min(lows_5m[-20:-2])
     prev_high = max(highs_5m[-20:-2])
     sweep_ok = False
@@ -259,11 +328,10 @@ def analyze(name, yahoo_sym):
                 sweep_ok = True
                 break
     if sweep_ok:
-        score += 20; details.append("5m Wick Sweep 50%+ ✅ +20")
+        score += 20; details.append("5m Wick Sweep ✅ +20")
     else:
         details.append("Wick Sweep ❌ +0")
 
-    # --- BOS 5m ---
     bos5_ok = False
     for i in range(len(df_5m)-5, len(df_5m)-1):
         c = closes_5m[i]
@@ -276,11 +344,11 @@ def analyze(name, yahoo_sym):
     else:
         details.append("5m BOS ❌ +0")
 
-    # --- FVG - V34: Must be MOST RECENT + price INSIDE + rejection ---
+    # --- FVG ---
     fvg_found = False
     fvg_top = fvg_bottom = 0
     fvg_ok = False
-    # Search backwards for most recent FVG, not first old one
+    fvg_inside = False
     for i in range(len(df_5m)-4, len(df_5m)-16, -1):
         if i < 2:
             break
@@ -291,18 +359,71 @@ def analyze(name, yahoo_sym):
         if trend == "SELL" and l1 > h3:
             fvg_top, fvg_bottom = l1, h3; fvg_found = True; break
     current = closes_5m[-1]
-    if not fvg_found:
-        return {"fail": True, "score": score, "reason": "No FVG - SKIP, no market entry", "trend": trend, "details": details}
-    # V34: Price MUST be inside FVG - no 50% tolerance outside
-    if not (fvg_bottom <= current <= fvg_top):
-        return {"fail": True, "score": score, "reason": f"FVG found but price NOT inside retest - Price {current:.5f} vs FVG {fvg_bottom:.5f}-{fvg_top:.5f} - WAIT", "trend": trend, "details": details}
-    # V34: Rejection required - last closed candle must reject from FVG edge
+    if fvg_found:
+        if fvg_bottom <= current <= fvg_top:
+            fvg_inside = True
+            score += 25; details.append("FVG INSIDE ✅ +25")
+            fvg_ok = True
+        elif abs(current - ((fvg_top+fvg_bottom)/2)) / current <= 0.003:
+            score += 15; details.append("FVG Near ✅ +15")
+            fvg_ok = True
+        else:
+            details.append("FVG Far - LIMIT and WAIT")
+    else:
+        details.append("FVG ❌ +0 - No fresh FVG")
+
+    # --- V34.3 ORDER BLOCKS ---
+    obs = find_order_blocks(df_5m, trend)
+    ob_ok = False
+    ob_type = "None"
+    ob_top = ob_bottom = ob_mid = 0
+    ob_fresh = False
+    ob_inside = False
+    ob_quality = "Weak"
+    if obs:
+        # Pick nearest OB to current price that is in signal direction
+        best_ob = None
+        best_dist = 99999
+        for o in obs:
+            dist = abs(o["mid"] - current)
+            # For BUY, OB should be at or below price (pullback zone). For SELL, at or above.
+            if trend == "BUY" and o["mid"] > current + atr_val * 0.5:
+                continue
+            if trend == "SELL" and o["mid"] < current - atr_val * 0.5:
+                continue
+            if dist < best_dist:
+                best_dist = dist
+                best_ob = o
+        if best_ob:
+            ob_ok = True
+            ob_type = best_ob["type"]
+            ob_top, ob_bottom, ob_mid = best_ob["top"], best_ob["bottom"], best_ob["mid"]
+            ob_fresh = best_ob.get("fresh", False)
+            ob_inside = ob_bottom <= current <= ob_top
+            # Quality: Fresh + Breaker/Mitigation = strongest
+            if "BREAKER" in ob_type:
+                score += 30; ob_quality = "STRONG - Breaker"
+                details.append(f"🔥 BREAKER {ob_type} ✅ +30 - Old OB flipped, sharpest")
+            elif "MITIGATION" in ob_type:
+                score += 28; ob_quality = "STRONG - Mitigation 2nd tap"
+                details.append(f"🔥 MITIGATION {ob_type} ✅ +28 - 2nd tap, sharp re-entry")
+            elif ob_fresh:
+                score += 25; ob_quality = "FRESH OB"
+                details.append(f"OB {ob_type} FRESH ✅ +25 - {ob_bottom:.5f}-{ob_top:.5f}")
+            else:
+                score += 15; ob_quality = "OLD OB"
+                details.append(f"OB {ob_type} OLD ✅ +15")
+            if ob_inside:
+                score += 10; details.append("OB Price INSIDE ✅ +10")
+    else:
+        details.append("OB ❌ +0 - No OB found")
+
+    # Rejection
     last_c = df_5m.iloc[-1]
     last_rng = last_c['High'] - last_c['Low']
     rejection_ok = False
     if last_rng > 0:
         if trend == "BUY":
-            # Wick from bottom
             wick = last_c['Close'] - last_c['Low']
             if wick / last_rng > 0.4:
                 rejection_ok = True
@@ -310,128 +431,99 @@ def analyze(name, yahoo_sym):
             wick = last_c['High'] - last_c['Close']
             if wick / last_rng > 0.4:
                 rejection_ok = True
-    if not rejection_ok:
-        return {"fail": True, "score": score, "reason": "No rejection candle in FVG - price just sitting, WAIT", "trend": trend, "details": details}
-    score += 25; details.append("FVG Retest INSIDE + Rejection ✅ +25")
-    fvg_ok = True
-
-    print(f"{name} {trend} Score: {score}/120 RSI:{rsi_15m:.1f} 1H:{htf_trend} 4H:{htf4_trend}", flush=True)
-    if score < 70:
-        return {"fail": True, "score": score, "reason": "Score <70", "trend": trend, "details": details}
-    # V34 SHARP: Need ALL THREE - BOS + FVG + Sweep for manual A+
-    if not (bos_ok and fvg_ok and sweep_ok):
-        return {"fail": True, "score": score, "reason": f"Quality Gate FAIL - Need BOS+FVG+Sweep. BOS:{bos_ok} FVG:{fvg_ok} Sweep:{sweep_ok}", "trend": trend, "details": details}
-
-    # V34: Entry = FVG Mid ONLY - NO market chase
-    fvg_mid = (fvg_top + fvg_bottom) / 2
-    entry = fvg_mid
-    entry_mode = "LIMIT - FVG Mid - WAIT for fill"
-    # If entry too far from live price, skip - don't chase
-    if abs(entry - current) / current > 0.002:
-        return {"fail": True, "score": score, "reason": "Entry too far from price - chasing, skip", "trend": trend, "details": details}
-
-    if entry < current and trend == "BUY":
-        order_type = "BUY LIMIT"
-    elif entry > current and trend == "BUY":
-        order_type = "BUY STOP - SKIP, use LIMIT only"
-        return {"fail": True, "score": score, "reason": "BUY STOP not allowed in V34 - only LIMIT pullbacks", "trend": trend, "details": details}
-    elif entry > current and trend == "SELL":
-        order_type = "SELL LIMIT"
-    elif entry < current and trend == "SELL":
-        order_type = "SELL STOP - SKIP, use LIMIT only"
-        return {"fail": True, "score": score, "reason": "SELL STOP not allowed in V34 - only LIMIT pullbacks", "trend": trend, "details": details}
+    if rejection_ok:
+        score += 10; details.append("Rejection Wick ✅ +10")
     else:
-        order_type = f"{trend} LIMIT"
+        details.append("Rejection ❌ +0")
 
-    # V34: SL = ATR 1.0x ONLY - No widening, tighter
+    print(f"{name} {trend} Score: {score}/180 RSI:{rsi_15m:.1f} OB:{ob_type} FVG:{fvg_ok}", flush=True)
+    if score < 60:
+        return {"fail": True, "score": score, "reason": "Score <60", "trend": trend, "details": details}
+
+    # --- TIER: Now with OB ---
+    confluence = sum([1 for x in [bos_ok, sweep_ok, fvg_ok, ob_ok] if x])
+    if confluence >= 3 and not chase and not exhausted and not htf_conflict and not htf4_conflict and (fvg_inside or ob_inside) and rejection_ok:
+        tier = "🔥 A+ SHARP OB"
+        tier_label = "A+"
+        take_it = "✅ YES - Take it"
+    elif confluence >= 3 and not chase:
+        tier = "✅ A - GOOD OB"
+        tier_label = "A"
+        take_it = "✅ YES - Take it, 0.01 only"
+    elif confluence >= 2:
+        tier = "⚠️ A- CHASE / WATCH"
+        tier_label = "A-"
+        take_it = "⚠️ WAIT - Use LIMIT only"
+    else:
+        tier = "👀 WATCH ONLY"
+        tier_label = "WATCH"
+        take_it = "❌ NO - Watch only"
+
+    # --- SHARP ENTRY: Choose best zone - OB Mid preferred if closer, else FVG Mid ---
+    # If both exist, pick the one price is closest to / inside
+    entry = None
+    entry_type = "FVG"
+    if ob_ok and fvg_found:
+        dist_ob = abs(ob_mid - current)
+        dist_fvg = abs(((fvg_top+fvg_bottom)/2) - current)
+        if ob_inside or dist_ob < dist_fvg:
+            entry = ob_mid; entry_type = f"OB {ob_type}"
+        else:
+            entry = (fvg_top+fvg_bottom)/2; entry_type = "FVG"
+    elif ob_ok:
+        entry = ob_mid; entry_type = f"OB {ob_type}"
+    elif fvg_found:
+        entry = (fvg_top+fvg_bottom)/2; entry_type = "FVG"
+    else:
+        entry = current; entry_type = "Pullback"
+
+    entry_mode = f"LIMIT - {entry_type} Mid - WAIT, don't chase"
     if trend == "BUY":
-        sl = entry - atr_val * 1.0
-        risk = entry - sl
-        tp = entry + risk * 1.5  # V34: 1.5R
+        order_type = "BUY LIMIT"
     else:
-        sl = entry + atr_val * 1.0
+        order_type = "SELL LIMIT"
+
+    # --- SL = Invalidation (OB low/high) OR ATR, whichever tighter but logical ---
+    # V34.3: SL at OB edge + small buffer, capped by ATR 1.2x
+    if trend == "BUY":
+        # Invalidation = below OB bottom or FVG bottom
+        inval = ob_bottom if ob_ok else (fvg_bottom if fvg_found else entry - atr_val)
+        sl_inval = inval - atr_val * 0.2
+        sl_atr = entry - atr_val * 1.0
+        # Use the tighter of the two but not above entry - 0.2 ATR
+        sl = max(sl_inval, sl_atr)  # tighter = higher SL for BUY
+        risk = entry - sl
+        # If risk too small, expand to ATR 0.8x min
+        if risk < atr_val * 0.5:
+            sl = entry - atr_val * 0.8
+            risk = entry - sl
+    else:
+        inval = ob_top if ob_ok else (fvg_top if fvg_found else entry + atr_val)
+        sl_inval = inval + atr_val * 0.2
+        sl_atr = entry + atr_val * 1.0
+        sl = min(sl_inval, sl_atr)
         risk = sl - entry
-        tp = entry - risk * 1.5
+        if risk < atr_val * 0.5:
+            sl = entry + atr_val * 0.8
+            risk = sl - entry
+
     if risk <= 0:
         return {"fail": True, "score": score, "reason": "Risk <=0", "trend": trend}
     max_risk = MAX_RISK.get(name, 9999)
     if risk > max_risk:
-        return {"fail": True, "score": score, "reason": f"SL Cap - Risk {risk:.5f} > Max {max_risk} - Volatile, skip", "trend": trend, "details": details}
+        return {"fail": True, "score": score, "reason": f"SL Cap - Risk {risk:.5f} > Max {max_risk}", "trend": trend, "details": details}
     if risk / entry > 0.01:
         return {"fail": True, "score": score, "reason": "SL too wide", "trend": trend, "details": details}
-    confidence = round((score / 120) * 100, 1)
-    tier = "🔥 SHARP A+"
+
+    # Dual TP
+    if trend == "BUY":
+        tp1 = entry + risk * 1.0
+        tp2 = entry + risk * 2.0
+    else:
+        tp1 = entry - risk * 1.0
+        tp2 = entry - risk * 2.0
+
+    confidence = round((score / 180) * 100, 1)
     be_price = entry + risk * 0.5 if trend == "BUY" else entry - risk * 0.5
-    return {"symbol": name, "trend": trend, "order_type": order_type, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp": round(float(tp),5), "score": score, "confidence": confidence, "details": details, "tier": tier, "live_price": round(float(current),5), "rsi": round(float(rsi_15m),1), "htf": htf_trend, "htf4": htf4_trend, "entry_mode": entry_mode, "be_price": round(float(be_price),5), "risk": round(float(risk),5)}
-
-def bot_loop():
-    global last_activity
-    send_telegram("✅ *V34 SHARP - MANUAL MODE is LIVE*\n5 Pairs | 15m + 5m + 1H + 4H(BLOCK) | Score 70+ /120 | TP 1.5R\n🔥 NEW SHARP: Anti-Chase | Exhaustion | Rejection Required | BOS+FVG+Sweep ALL | Real EMA200 | LIMIT Only\n🛡️ SL: ATR 1.0x Tight | BE at 0.5R\n🎯 MANUAL: Only take A+ | If not A+, SKIP\n⏰ SESSION: 09-21 EAT | GOLD 11-19 EAT")
-    sent = set()
-    last_hunt_msg = time.time()
-    last_sent_time = {}
-    while True:
-        try:
-            tz = pytz.timezone("Africa/Nairobi")
-            now = dt.now(tz)
-            last_activity = time.time()
-            hour = now.hour + now.minute / 60.0
-            in_session = 9.0 <= hour < 21.0
-            if not in_session:
-                print(f"OUT OF SESSION - EAT {now} - sleeping, no signals", flush=True)
-                time.sleep(60)
-                continue
-            print(f"V34 checking... EAT {now} | SESSION ON 09-21 | SHARP", flush=True)
-            found_this_round = 0
-            best_score_this_round = 0
-            best_pair_this_round = "None"
-            for name, ysym in SYMBOLS.items():
-                try:
-                    if name == "XAUUSD" and not (11.0 <= hour < 19.0):
-                        print(f"{name}: Skipped - Gold only 11-19 EAT", flush=True)
-                        continue
-                    print(f"Checking {name}...", flush=True)
-                    res = analyze(name, ysym)
-                    if res and not res.get("fail"):
-                        found_this_round += 1
-                        last_hunt_msg = time.time()
-                        cool_key = f"{name}-{res['trend']}"
-                        if cool_key in last_sent_time and (time.time() - last_sent_time[cool_key]) < 3600:
-                            print(f"{name} {res['trend']} in cooldown 60min, skipping", flush=True)
-                            continue
-                        key = f"{name}-{res['trend']}-{res['entry']}"
-                        if key in sent:
-                            continue
-                        sent.add(key)
-                        last_sent_time[cool_key] = time.time()
-                        msg = (f"🔥 *V34 {res['tier']} - Score {res['score']}/120 ({res['confidence']}%) *\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nOrder Type: {res['order_type']}\nEntry Mode: {res['entry_mode']}\nLive Price: {res['live_price']}\nEntry: {res['entry']}\nSL: {res['sl']} (ATR 1.0x Tight)\nTP: {res['tp']} (1.5R - Close 100%)\nRSI: {res['rsi']} | 1H: {res['htf']} | 4H: {res['htf4']}\n\n" + "\n".join(res['details']) + f"\n\n🔥 *MANUAL SHARP CHECK:*\nChase Check: ✅ PASS - Not chased\nRejection: ✅ YES - Wick in FVG\nTake it? ✅ YES - A+ ONLY\n\n🛡️ *MANUAL RULES:*\nLot: 0.01 ONLY\n✅ BREAKEVEN: When price hits {res['be_price']}, MOVE SL TO ENTRY!\n⏰ MAX HOLD 1H - Close after 1h if not at TP\n⏰ If LIMIT not filled in 15 mins, CANCEL it\nSession: 09-21 EAT | Gold 11-19 EAT")
-                        send_telegram(msg)
-                    else:
-                        sc = res.get("score", 0) if res else 0
-                        if sc > best_score_this_round:
-                            best_score_this_round = sc
-                            best_pair_this_round = name
-                        reason = res.get("reason", "Unknown") if res else "None"
-                        tr = res.get("trend", "?") if res else "?"
-                        print(f"{name}: Score {sc}/120 - {tr} - {reason} - skipping", flush=True)
-                except Exception as e:
-                    print(f"Error {name}: {e}", flush=True)
-            if found_this_round == 0 and (time.time() - last_hunt_msg) >= 1800:
-                send_telegram(f"👀 *Still Hunting - SHARP Mode...*\n\nNo A+ setup yet. Waiting for BOS+FVG+Sweep + No Chase.\nBest close: {best_pair_this_round} - {best_score_this_round}/120\nEAT {now.strftime('%H:%M')} | Session 09-21 EAT")
-                last_hunt_msg = time.time()
-            # Clear sent cache every 4h to allow fresh signals
-            if len(sent) > 200:
-                sent.clear()
-            gc.collect()
-            print("Sleeping 60s...", flush=True)
-            time.sleep(60)
-        except Exception as e:
-            print(f"Bot loop crash, restarting in 10s: {e}", flush=True)
-            time.sleep(10)
-
-if __name__ == "__main__":
-    threading.Thread(target=heartbeat, daemon=True).start()
-    threading.Thread(target=watchdog, daemon=True).start()
-    threading.Thread(target=bot_loop, daemon=True).start()
-    print("V34 SHARP MANUAL - Flask is now MAIN thread, Bot is background", flush=True)
-    run_web()
+    inval_price = round(float(sl),5)
+    return {"symbol": name
