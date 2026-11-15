@@ -7,17 +7,17 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "V35.3.1 SMART+ TEST MODE ALIVE", 200
+    return "V35.4 SMART++ ALIVE", 200
 @app.route('/health')
 def health():
     return "OK", 200
 @app.route('/<path:path>')
 def catch_all(path):
-    return "V35.3.1 SMART+ TEST MODE ALIVE", 200
+    return "V35.4 SMART++ ALIVE", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    print(f"V35.3.1 Flask on {port}", flush=True)
+    print(f"V35.4 Flask on {port}", flush=True)
     app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -44,6 +44,9 @@ PAIR_BONUS = {
 PAIR_COOLDOWN_UNTIL = {}
 LAST_SIGNAL_PRICE = {}
 PAIR_SIGNAL_COUNT = {}
+# SMART++ MEMORY: Tracks hot/cold per pair - LEARNS during day
+PAIR_HOT_SCORE = {}  # +1 per signal, used for HOT PAIR bonus
+PAIR_LAST_SIGNAL_TIME = {}
 
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -169,6 +172,9 @@ def analyze(name, ysym, now):
     c15=df_15m['Close'].tolist(); c5=df_5m['Close'].tolist(); c1=df_1h['Close'].tolist(); c4=df_4h['Close'].tolist()
     h5=df_5m['High'].tolist(); l5=df_5m['Low'].tolist(); h15=df_15m['High'].tolist(); l15=df_15m['Low'].tolist()
     score=0; details=[]; warnings=[]; smart_notes=[]; tags=[]
+    # --- SMART++ 1: TREND STRENGTH METER - BONUS ONLY, NEVER PENALTY ---
+    trend_strength = 50  # 0-100
+    trend_label = "NORMAL"
     e50_4h=ema(c4,50); e20_4h=ema(c4,20); p4=c4[-1]
     htf4="BUY" if p4>e50_4h and p4>e20_4h else ("SELL" if p4<e50_4h and p4<e20_4h else None)
     e50_1h=ema(c1,50); e20_1h=ema(c1,20); p1=c1[-1]
@@ -180,6 +186,36 @@ def analyze(name, ysym, now):
         trend="SELL"; score+=20; details.append("EMA 50+200 SELL +20")
     else:
         return {"fail":True,"score":score,"reason":f"EMA fail {price:.5f} vs {e50:.5f}/{e200:.5f}","trend":"NONE"}
+    # TREND STRENGTH: Distance from EMA + Slope - BONUS ONLY
+    try:
+        dist_pct = abs(price - e50) / price * 100 if price!=0 else 0
+        # EMA slope last 5 candles
+        ema_series = []
+        tmp = c15[0]
+        k = 2/(50+1)
+        for v in c15:
+            tmp = v*k + tmp*(1-k)
+            ema_series.append(tmp)
+        slope = (ema_series[-1] - ema_series[-5]) / ema_series[-5] * 100 if len(ema_series)>=6 and ema_series[-5]!=0 else 0
+        if trend=="BUY": slope_val = slope
+        else: slope_val = -slope
+        # Strength 0-100
+        trend_strength = min(100, max(0, 50 + dist_pct*800 + slope_val*800))
+        if trend_strength >= 75:
+            trend_label = "STRONG"
+            score+=5; details.append(f"TREND STRONG {trend_strength:.0f}% +5 BONUS"); tags.append(f"TREND STRONG {trend_strength:.0f}%")
+            smart_notes.append("Strong Trend")
+        elif trend_strength >= 55:
+            trend_label = "NORMAL"
+            details.append(f"Trend Normal {trend_strength:.0f}%")
+            tags.append(f"TREND NORMAL {trend_strength:.0f}%")
+        else:
+            trend_label = "WEAK"
+            # SMART++: WEAK = TAG ONLY, NO PENALTY. Signal still sent.
+            details.append(f"Trend Weak {trend_strength:.0f}% - Tag only, NOT block")
+            tags.append(f"TREND WEAK {trend_strength:.0f}% - Caution")
+    except Exception as e:
+        details.append(f"Trend Strength Error {e}")
     if htf is not None and htf==trend:
         score+=5; details.append(f"1H Agrees {htf} +5"); tags.append("1H AGREE")
     elif htf is not None and htf!=trend:
@@ -193,6 +229,15 @@ def analyze(name, ysym, now):
     pb = PAIR_BONUS.get(name, 0)
     if pb!=0:
         score+=pb; details.append(f"Pair Bonus {name} +{pb}")
+    # --- SMART++ 2: HOT PAIR MEMORY - BONUS ONLY ---
+    hot_score = PAIR_HOT_SCORE.get(name, 0)
+    if hot_score >= 2:
+        score+=5; details.append(f"HOT PAIR {name} - {hot_score} signals today +5 BONUS"); tags.append(f"HOT PAIR 🔥 {hot_score} today"); smart_notes.append("Hot Pair")
+    elif hot_score == 1:
+        details.append(f"Pair seen 1x today - Normal")
+        tags.append("Pair 1x today")
+    else:
+        details.append(f"Pair fresh today - First signal")
     sess_label, is_prime = get_session_label(now)
     if is_prime:
         score+=5; details.append(f"{sess_label} +5 - PRIME"); tags.append("PRIME SESSION"); smart_notes.append(sess_label)
@@ -244,6 +289,34 @@ def analyze(name, ysym, now):
     bos_ok=(trend=="BUY" and c15[-1]>hi_prev) or (trend=="SELL" and c15[-1]<lo_prev)
     if bos_ok: score+=20; details.append("15m BOS +20")
     else: details.append("BOS 0")
+    # --- SMART++ 3: STRUCTURE - DOUBLE TOP/BOTTOM + CLEAN BREAKOUT - BONUS/TAG ONLY ---
+    structure_tag = "None"
+    structure_bonus = 0
+    try:
+        # Look at last 20 highs for double top/bottom
+        last_highs = h15[-20:]
+        last_lows = l15[-20:]
+        max_h = max(last_highs); min_l = min(last_lows)
+        # Count touches near max_h
+        touches_high = sum(1 for h in last_highs if abs(h - max_h)/max_h < 0.001)
+        touches_low = sum(1 for l in last_lows if abs(l - min_l)/min_l < 0.001)
+        if trend=="SELL" and touches_high >= 2:
+            structure_tag = "DOUBLE TOP - Reversal Risk"
+            tags.append("DOUBLE TOP - Reversal Risk"); details.append("Structure: Double Top - Tag only, NOT block")
+            smart_notes.append("Double Top")
+        elif trend=="BUY" and touches_low >= 2:
+            structure_tag = "DOUBLE BOTTOM - Reversal Risk"
+            tags.append("DOUBLE BOTTOM - Reversal Risk"); details.append("Structure: Double Bottom - Tag only, NOT block")
+            smart_notes.append("Double Bottom")
+        elif bos_ok:
+            # Clean breakout - price broke high with no double top
+            structure_tag = "CLEAN BREAKOUT"
+            structure_bonus = 5
+            score+=5; details.append("CLEAN BREAKOUT +5 BONUS"); tags.append("CLEAN BREAKOUT"); smart_notes.append("Clean Breakout")
+        else:
+            details.append("Structure: Normal")
+    except Exception as e:
+        details.append(f"Structure Error {e}")
     prev_low=min(l5[-20:-2]); prev_high=max(h5[-20:-2])
     sweep_ok=False; sweep_bonus=False; sweep_level="Local"
     y_high=None; y_low=None
@@ -327,12 +400,29 @@ def analyze(name, ysym, now):
     repeat_count = PAIR_SIGNAL_COUNT.get(name, 0)
     if repeat_count >= 2:
         tags.append(f"REPEAT - {repeat_count}th signal today, be careful")
+    # --- SMART++ 4: FRESHNESS - TAG ONLY, NEVER BLOCK ---
+    freshness = 100
+    freshness_label = "FRESH"
+    try:
+        last_time = PAIR_LAST_SIGNAL_TIME.get(name)
+        if last_time:
+            mins_ago = (time.time() - last_time) / 60
+            if mins_ago < 5: freshness = 100; freshness_label = "FRESH"
+            elif mins_ago < 15: freshness = 80; freshness_label = "FRESH"
+            elif mins_ago < 30: freshness = 60; freshness_label = "STALE - Check entry"
+            else: freshness = 100; freshness_label = "FRESH - New cycle"
+            tags.append(f"{freshness_label} - Last signal {mins_ago:.0f}m ago")
+            details.append(f"Freshness: {freshness_label} ({mins_ago:.0f}m ago)")
+        else:
+            tags.append("FRESH - First today")
+            details.append("Freshness: FRESH - First today")
+    except: pass
     raw_score=score; score=min(score,120)
-    print(f"{name} {trend} Score {score}/120 Raw {raw_score} Thr {threshold} RSI {r:.1f} OB {ob_type} FVG {fvg_ok} 1m {m1_ok} Tags {tags}", flush=True)
+    print(f"{name} {trend} Score {score}/120 Raw {raw_score} Thr {threshold} RSI {r:.1f} OB {ob_type} FVG {fvg_ok} 1m {m1_ok} Trend {trend_label} {trend_strength:.0f}% Struct {structure_tag} Fresh {freshness_label} Hot {hot_score} Tags {tags}", flush=True)
     if score < threshold - 10:
         return {"fail":True,"score":score,"reason":f"Score {score} < Watch {threshold-10}","trend":trend,"details":details,"threshold":threshold}
     if score < threshold:
-        return {"watch":True,"score":score,"trend":trend,"details":details,"symbol":name,"live_price":round(float(current),5),"rsi":round(float(r),1),"htf":htf,"htf4":htf4,"smart_notes":smart_notes,"ob_type":ob_type,"tags":tags,"threshold":threshold,"sess_label":sess_label}
+        return {"watch":True,"score":score,"trend":trend,"details":details,"symbol":name,"live_price":round(float(current),5),"rsi":round(float(r),1),"htf":htf,"htf4":htf4,"smart_notes":smart_notes,"ob_type":ob_type,"tags":tags,"threshold":threshold,"sess_label":sess_label,"trend_strength":round(float(trend_strength),0),"trend_label":trend_label,"structure_tag":structure_tag,"freshness":freshness_label}
     conf=sum([1 for x in [bos_ok,sweep_ok,fvg_ok,ob_ok] if x])
     if score>=90 and conf>=3 and not chase and (fvg_inside or ob_inside) and rej and m1_ok:
         tier="S-TIER SCALP"; tier_label="S"; take_it="YES - BEST SIGNAL - Take it"
@@ -369,31 +459,27 @@ def analyze(name, ysym, now):
     if trend=="BUY": tp1=entry+risk*0.8; tp2=entry+risk*1.5
     else: tp1=entry-risk*0.8; tp2=entry-risk*1.5
     conf_pct=round((score/120)*100,1)
-    return {"symbol":name,"trend":trend,"order_type":order_type,"entry":round(float(entry),5),"sl":round(float(sl),5),"tp1":round(float(tp1),5),"tp2":round(float(tp2),5),"score":score,"confidence":conf_pct,"details":details,"tier":tier,"tier_label":tier_label,"take_it":take_it,"live_price":round(float(current),5),"rsi":round(float(r),1),"htf":htf,"htf4":htf4,"entry_type":entry_type,"ob_type":ob_type,"ob_quality":ob_quality,"ob_top":round(float(ob_top),5) if ob_ok else 0,"ob_bottom":round(float(ob_bottom),5) if ob_ok else 0,"warnings":warnings,"chase":chase,"fvg_inside":fvg_inside,"rejection":rej,"inval":round(float(sl),5),"smart_notes":smart_notes,"sl_mult":sl_mult,"sweep_level":sweep_level if sweep_ok else "None","m1_ok":m1_ok,"tags":tags,"threshold":threshold,"sess_label":sess_label,"is_chop":is_chop,"is_prime":is_prime}
+    return {"symbol":name,"trend":trend,"order_type":order_type,"entry":round(float(entry),5),"sl":round(float(sl),5),"tp1":round(float(tp1),5),"tp2":round(float(tp2),5),"score":score,"confidence":conf_pct,"details":details,"tier":tier,"tier_label":tier_label,"take_it":take_it,"live_price":round(float(current),5),"rsi":round(float(r),1),"htf":htf,"htf4":htf4,"entry_type":entry_type,"ob_type":ob_type,"ob_quality":ob_quality,"ob_top":round(float(ob_top),5) if ob_ok else 0,"ob_bottom":round(float(ob_bottom),5) if ob_ok else 0,"warnings":warnings,"chase":chase,"fvg_inside":fvg_inside,"rejection":rej,"inval":round(float(sl),5),"smart_notes":smart_notes,"sl_mult":sl_mult,"sweep_level":sweep_level if sweep_ok else "None","m1_ok":m1_ok,"tags":tags,"threshold":threshold,"sess_label":sess_label,"is_chop":is_chop,"is_prime":is_prime,"trend_strength":round(float(trend_strength),0),"trend_label":trend_label,"structure_tag":structure_tag,"freshness":freshness_label,"freshness_pct":freshness,"hot_score":hot_score}
 
 def bot_loop():
-    send_telegram("V35.3.1 SMART+ TEST MODE LIVE\n12 Pairs | Adaptive Threshold 78-82 | S-TIER 90+ / A-TIER 80+ / B-TIER / WATCH\nSMART+: Additive Only - No Penalties | Tags Not Blocks\nSCALPER: TP 0.8R + 1.5R | Max Hold 20m | 1m Confirm\nSessions: 09-21 EAT - PRIME vs CHOP Label, Not Block | GOLD 11-19\nTEST MODE: On Weekend, bot does dry-run analysis every 60s so you see it in logs")
+    send_telegram("V35.4 SMART++ LIVE - NO REDUCTION GUARANTEE\n12 Pairs | Adaptive 78-82 | S-TIER 90+ / A-TIER 80+ / B-TIER / WATCH\nSMART++: HOT Pair +5 | STRONG Trend +5 | CLEAN Breakout +5 | All BONUS ONLY\nTAGS NOT BLOCKS: Weak Trend / Double Top / Cold / Stale = Tag Only\nSCALPER: TP 0.8R + 1.5R | Max Hold 20m | 1m Confirm\nSessions: 09-21 EAT - PRIME vs CHOP Label | GOLD 11-19\nTEST MODE: Weekend dry-run every 60s")
     sent=set(); last_hunt=time.time(); last_sent_time={}; last_debug=time.time(); debug_reasons={}
     watch_sent=set()
     while True:
         try:
             tz=pytz.timezone("Africa/Nairobi"); now=dt.now(tz); hour=now.hour+now.minute/60.0
-            # --- WEEKEND TEST MODE: Analyze so you SEE it working ---
             if now.weekday()>=5:
                 print(f"WEEKEND {now} - Market closed, but TEST MODE: Doing dry-run analysis", flush=True)
                 try:
-                    # Test 3 pairs to show analyzing - rotates each minute
                     test_pairs = ["EURUSD", "GBPUSD", "XAUUSD"]
-                    # Pick based on minute so it rotates
                     pick = test_pairs[now.minute % len(test_pairs)]
                     ysym = SYMBOLS[pick]
                     print(f"TEST ANALYSIS: Checking {pick}...", flush=True)
                     res = analyze(pick, ysym, now)
                     print(f"TEST ANALYSIS {pick}: {res}", flush=True)
-                    # Also send a Telegram test update every 30 mins so you see it
                     if now.minute % 30 == 0 and now.second < 65:
                         if res and not res.get("fail"):
-                            send_telegram(f"TEST MODE - Weekend Dry Run\n\nPair: {pick}\nScore: {res.get('score')}/120\nTier: {res.get('tier')}\nTrend: {res.get('trend')}\nThis is TEST only, market closed. Real signals start Monday 09:00 EAT.")
+                            send_telegram(f"TEST MODE - Weekend Dry Run\n\nPair: {pick}\nScore: {res.get('score')}/120\nTier: {res.get('tier')}\nTrend: {res.get('trend')} | Trend Strength: {res.get('trend_strength')}% {res.get('trend_label')}\nStructure: {res.get('structure_tag')} | Fresh: {res.get('freshness')}\nThis is TEST only, market closed. Real signals start Monday 09:00 EAT.")
                         elif res and res.get("watch"):
                             send_telegram(f"TEST MODE - Weekend Dry Run\n\nPair: {pick}\nScore: {res.get('score')}/120 - WATCH\nTrend: {res.get('trend')}\nThis is TEST only. Real signals start Monday 09:00 EAT.")
                         else:
@@ -406,7 +492,7 @@ def bot_loop():
             if is_news_time(now):
                 print(f"NEWS TIME {now} - blocked, sleeping", flush=True); time.sleep(300); continue
             sess_label, is_prime = get_session_label(now)
-            print(f"V35.3.1 SMART+ checking {now} Session {sess_label}", flush=True)
+            print(f"V35.4 SMART++ checking {now} Session {sess_label}", flush=True)
             found=0; best_score=0; best_pair="None"
             for name, ysym in SYMBOLS.items():
                 try:
@@ -420,11 +506,13 @@ def bot_loop():
                         if wkey not in watch_sent:
                             watch_sent.add(wkey)
                             tags_txt=" | ".join(res.get('tags',[])) or "Getting ready"
-                            send_telegram(f"WATCH - Score {res['score']}/120 (Need {res['threshold']})\n\nPair: {name}\nDirection: {res['trend']}\nLive: {res['live_price']}\nRSI: {res['rsi']} | 1H: {res['htf']} | 4H: {res['htf4']}\nSession: {res['sess_label']}\nTags: {tags_txt}\n\n" + "\n".join(res['details']) + "\n\nNot a trade yet. Wait for S/A Tier.")
+                            send_telegram(f"WATCH - Score {res['score']}/120 (Need {res['threshold']})\n\nPair: {name}\nDirection: {res['trend']}\nLive: {res['live_price']}\nRSI: {res['rsi']} | 1H: {res['htf']} | 4H: {res['htf4']}\nSession: {res['sess_label']}\nTrend: {res.get('trend_label')} {res.get('trend_strength')}%\nStructure: {res.get('structure_tag')} | Fresh: {res.get('freshness')}\nTags: {tags_txt}\n\n" + "\n".join(res['details']) + "\n\nNot a trade yet. Wait for S/A Tier.")
                         continue
                     if res and not res.get("fail"):
                         found+=1; last_hunt=time.time()
                         PAIR_SIGNAL_COUNT[name] = PAIR_SIGNAL_COUNT.get(name,0)+1
+                        PAIR_HOT_SCORE[name] = PAIR_HOT_SCORE.get(name,0)+1
+                        PAIR_LAST_SIGNAL_TIME[name] = time.time()
                         cool=f"{name}-{res['trend']}-{res['tier_label']}"
                         if cool in last_sent_time and (time.time()-last_sent_time[cool])<1200: continue
                         key=f"{name}-{res['trend']}-{res['entry']}-{res['tier_label']}"
@@ -434,11 +522,18 @@ def bot_loop():
                         warn_txt="\n".join([f"WARNING: {w}" for w in res.get('warnings',[])]) if res.get('warnings') else "No warnings"
                         smart_txt=", ".join(res.get('smart_notes',[])) or "None"
                         tags_txt=" | ".join(res.get('tags',[])) or "None"
-                        if res['tier_label']=="S": lot_advice="Lot: 0.01 - BEST SIGNAL"
-                        elif res['tier_label']=="A": lot_advice="Lot: 0.01 ONLY"
-                        else: lot_advice="Lot: 0.01 - B-TIER - Consider skipping if unsure"
+                        # SMART++ LOT ADVISOR - Based on Tier + Trend + Hot + Fresh
+                        if res['tier_label']=="S" and res.get('trend_label')=="STRONG":
+                            lot_advice="Lot: 0.01 - BEST SIGNAL - STRONG + S-TIER"
+                        elif res['tier_label']=="S":
+                            lot_advice="Lot: 0.01 - S-TIER"
+                        elif res['tier_label']=="A":
+                            lot_advice="Lot: 0.01 ONLY"
+                        else:
+                            lot_advice="Lot: 0.01 - B-TIER - Consider skipping if unsure"
                         if res.get('is_chop'): lot_advice += "\nCHOP TAG - Half risk or skip"
-                        msg=f"{res['tier']} - Score {res['score']}/120 ({res['confidence']}%) - {res['sess_label']}\nThreshold: {res['threshold']}\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nOrder: {res['order_type']}\nEntry Type: {res['entry_type']} - {res['ob_quality']}\nLive: {res['live_price']}\nEntry: {res['entry']}\nOB: {res['ob_bottom']} - {res['ob_top']} ({res['ob_type']})\nSL: {res['sl']} (Tight Scalp x{res['sl_mult']})\nTP1: {res['tp1']} (0.8R - Close 50% + BE)\nTP2: {res['tp2']} (1.5R - Close 50%)\nRSI: {res['rsi']} | 1H: {res['htf']} | 4H: {res['htf4']}\nSweep: {res['sweep_level']} | 1m Confirm: {res['m1_ok']}\nSmart: {smart_txt}\nTags: {tags_txt}\n\n" + "\n".join(res['details']) + f"\n\nWARNINGS:\n{warn_txt}\n\nDECISION: {res['take_it']}\n\nSCALPER RULES:\n{lot_advice}\nTP1: Close 50%, MOVE SL TO ENTRY IMMEDIATELY\nTP2: Close 50%\nMAX HOLD 20 MINS - If not TP1 in 20m, EXIT\nIf closes past {res['inval']}, exit = Pair paused 2h\nLIMIT not filled 10m = CANCEL"
+                        if res.get('trend_label')=="WEAK": lot_advice += "\nWEAK TREND - Move to BE fast"
+                        msg=f"{res['tier']} - Score {res['score']}/120 ({res['confidence']}%) - {res['sess_label']}\nThreshold: {res['threshold']}\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nOrder: {res['order_type']}\nEntry Type: {res['entry_type']} - {res['ob_quality']}\nLive: {res['live_price']}\nEntry: {res['entry']}\nOB: {res['ob_bottom']} - {res['ob_top']} ({res['ob_type']})\nSL: {res['sl']} (Tight Scalp x{res['sl_mult']})\nTP1: {res['tp1']} (0.8R - Close 50% + BE)\nTP2: {res['tp2']} (1.5R - Close 50%)\nRSI: {res['rsi']} | 1H: {res['htf']} | 4H: {res['htf4']}\nSweep: {res['sweep_level']} | 1m Confirm: {res['m1_ok']}\nSmart: {smart_txt}\nTags: {tags_txt}\nSMART++: Trend {res.get('trend_label')} {res.get('trend_strength')}% | Structure: {res.get('structure_tag')} | Fresh: {res.get('freshness')} ({res.get('freshness_pct')}%) | Hot: {res.get('hot_score')} today\n\n" + "\n".join(res['details']) + f"\n\nWARNINGS:\n{warn_txt}\n\nDECISION: {res['take_it']}\n\nSCALPER RULES:\n{lot_advice}\nTP1: Close 50%, MOVE SL TO ENTRY IMMEDIATELY\nTP2: Close 50%\nMAX HOLD 20 MINS - If not TP1 in 20m, EXIT\nIf closes past {res['inval']}, exit = Pair paused 2h\nLIMIT not filled 10m = CANCEL"
                         send_telegram(msg)
                     else:
                         sc=res.get("score",0) if res else 0
@@ -449,10 +544,10 @@ def bot_loop():
                     print(f"Error {name}: {e}", flush=True); traceback.print_exc()
             if (time.time()-last_debug)>=1800:
                 dbg="\n".join([f"{k}: {v}" for k,v in debug_reasons.items()])
-                send_telegram(f"V35.3.1 Debug - Alive - {sess_label}\n\n{dbg}\nBest: {best_pair} {best_score}/120\nEAT {now.strftime('%H:%M')}")
+                send_telegram(f"V35.4 Debug - Alive - {sess_label}\n\n{dbg}\nBest: {best_pair} {best_score}/120\nEAT {now.strftime('%H:%M')}")
                 last_debug=time.time(); debug_reasons={}; watch_sent.clear()
             if found==0 and (time.time()-last_hunt)>=1800:
-                send_telegram(f"Still Hunting SCALPS - V35.3.1 SMART+...\n\nNo S/A yet. Session: {sess_label}\nBest: {best_pair} - {best_score}/120\nEAT {now.strftime('%H:%M')}")
+                send_telegram(f"Still Hunting SCALPS - V35.4 SMART++...\n\nNo S/A yet. Session: {sess_label}\nBest: {best_pair} - {best_score}/120\nEAT {now.strftime('%H:%M')}")
                 last_hunt=time.time()
             if len(sent)>200: sent.clear()
             gc.collect(); print("Sleeping 60s...", flush=True); time.sleep(60)
@@ -462,5 +557,5 @@ def bot_loop():
 if __name__=="__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
-    print("V35.3.1 SMART+ TEST MODE - Flask is now MAIN thread, Bot is background", flush=True)
+    print("V35.4 SMART++ - Flask is now MAIN thread, Bot is background", flush=True)
     run_web()
