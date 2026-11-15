@@ -7,15 +7,19 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "V34.6 CLEAN ALIVE", 200
+    return "V34.7 CLEAN ALIVE", 200
 
 @app.route('/health')
 def health():
     return "OK", 200
 
+@app.route('/<path:path>')
+def catch_all(path):
+    return "V34.7 CLEAN ALIVE", 200
+
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    print(f"V34.6 Flask on {port}", flush=True)
+    print(f"V34.7 Flask on {port}", flush=True)
     app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -29,8 +33,11 @@ def send_telegram(msg):
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
+        # FIX: No Markdown - prevents Telegram 400 errors
+        r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=10)
         print(f"Telegram {r.status_code}", flush=True)
+        if r.status_code != 200:
+            print(f"Telegram body: {r.text[:200]}", flush=True)
     except Exception as e:
         print(f"Telegram error {e}", flush=True)
 
@@ -140,6 +147,7 @@ def analyze(name, ysym):
         return {"fail": True, "score": 0, "reason": "No data"}
     if len(df_5m) < 50 or len(df_15m) < 50 or len(df_1h) < 20 or len(df_4h) < 20:
         return {"fail": True, "score": 0, "reason": "Not enough candles"}
+    # Drop unfinished candle - use only closed candles
     df_5m = df_5m.iloc[:-1]
     df_15m = df_15m.iloc[:-1]
     c15 = df_15m['Close'].tolist()
@@ -255,14 +263,15 @@ def analyze(name, ysym):
     if bos5:
         score += 15
         details.append("5m BOS +15")
+    # FIXED FVG: Search forward, not backwards, avoid index out of range
     fvg_found = False
     fvg_top = 0
     fvg_bottom = 0
     fvg_ok = False
     fvg_inside = False
-    for i in range(len(df_5m)-4, len(df_5m)-16, -1):
-        if i < 2:
-            break
+    for i in range(len(df_5m)-16, len(df_5m)-3):
+        if i < 2 or i+2 >= len(df_5m):
+            continue
         h1 = h5[i]
         l1 = l5[i]
         h3 = h5[i+2]
@@ -356,19 +365,19 @@ def analyze(name, ysym):
         return {"fail": True, "score": score, "reason": "Score <50", "trend": trend, "details": details}
     conf = sum([1 for x in [bos_ok, sweep_ok, fvg_ok, ob_ok] if x])
     if conf >= 3 and not chase and not exhausted and (fvg_inside or ob_inside) and rej:
-        tier = "🔥 A+ SHARP OB"
+        tier = "A+ SHARP OB"
         tier_label = "A+"
         take_it = "YES - Take it"
     elif conf >= 2:
-        tier = "✅ A - GOOD OB"
+        tier = "A - GOOD OB"
         tier_label = "A"
         take_it = "YES - Take it, 0.01 only"
     elif conf >= 1 and (fvg_ok or ob_ok):
-        tier = "⚠️ A- WATCH"
+        tier = "A- WATCH"
         tier_label = "A-"
         take_it = "WAIT - LIMIT only"
     else:
-        tier = "👀 WATCH ONLY"
+        tier = "WATCH ONLY"
         tier_label = "WATCH"
         take_it = "NO - Watch only"
     if ob_ok and fvg_found:
@@ -419,7 +428,7 @@ def analyze(name, ysym):
     return {"symbol": name, "trend": trend, "order_type": order_type, "entry": round(float(entry),5), "sl": round(float(sl),5), "tp1": round(float(tp1),5), "tp2": round(float(tp2),5), "score": score, "confidence": conf_pct, "details": details, "tier": tier, "tier_label": tier_label, "take_it": take_it, "live_price": round(float(current),5), "rsi": round(float(r),1), "htf": htf, "htf4": htf4, "entry_type": entry_type, "ob_type": ob_type, "ob_quality": ob_quality, "ob_top": round(float(ob_top),5) if ob_ok else 0, "ob_bottom": round(float(ob_bottom),5) if ob_ok else 0, "warnings": warnings, "chase": chase, "fvg_inside": fvg_inside, "rejection": rej, "inval": round(float(sl),5)}
 
 def bot_loop():
-    send_telegram("✅ *V34.6 CLEAN LIVE*\n5 Pairs | Score 50+ /180 | Dual TP 1R + 2R\nOBs + FVG | No watchdog killer\nSession 09-21 EAT | GOLD 11-19 EAT")
+    send_telegram("V34.7 CLEAN LIVE\n5 Pairs | Score 50+ /180 | Dual TP 1R + 2R\nOBs + FVG | No Markdown bug\nSession 09-21 EAT | GOLD 11-19 EAT")
     sent = set()
     last_hunt = time.time()
     last_sent_time = {}
@@ -434,7 +443,7 @@ def bot_loop():
                 print(f"OUT OF SESSION {now} - alive, sleeping", flush=True)
                 time.sleep(60)
                 continue
-            print(f"V34.6 checking {now}", flush=True)
+            print(f"V34.7 checking {now}", flush=True)
             found = 0
             best_score = 0
             best_pair = "None"
@@ -455,7 +464,7 @@ def bot_loop():
                             continue
                         sent.add(key)
                         last_sent_time[cool] = time.time()
-                        warn_txt = "\n".join([f"⚠️ {w}" for w in res.get('warnings', [])]) if res.get('warnings') else "No warnings"
+                        warn_txt = "\n".join([f"WARNING: {w}" for w in res.get('warnings', [])]) if res.get('warnings') else "No warnings"
                         msg = f"{res['tier']} - Score {res['score']}/180 ({res['confidence']}%)\n\nPair: {res['symbol']}\nDirection: {res['trend']}\nOrder: {res['order_type']}\nEntry Type: {res['entry_type']} - {res['ob_quality']}\nLive: {res['live_price']}\nEntry: {res['entry']}\nOB: {res['ob_bottom']} - {res['ob_top']} ({res['ob_type']})\nSL: {res['sl']}\nTP1: {res['tp1']} (1R - Close 50%)\nTP2: {res['tp2']} (2R - Close 50%)\nRSI: {res['rsi']} | 1H: {res['htf']} | 4H: {res['htf4']}\n\n" + "\n".join(res['details']) + f"\n\nWARNINGS:\n{warn_txt}\n\nDECISION: {res['take_it']}\n\nLot: 0.01 ONLY\nTP1: Close 50%, MOVE SL TO ENTRY\nTP2: Close 50%\nIf closes past {res['inval']}, exit\nMAX HOLD 1H | LIMIT not filled 15m = CANCEL"
                         send_telegram(msg)
                     else:
@@ -470,15 +479,16 @@ def bot_loop():
                     traceback.print_exc()
             if (time.time() - last_debug) >= 1800:
                 dbg = "\n".join([f"{k}: {v}" for k, v in debug_reasons.items()])
-                send_telegram(f"🔍 *V34.6 Debug - Alive*\n\n{dbg}\nBest: {best_pair} {best_score}/180\nEAT {now.strftime('%H:%M')}")
+                send_telegram(f"V34.7 Debug - Alive\n\n{dbg}\nBest: {best_pair} {best_score}/180\nEAT {now.strftime('%H:%M')}")
                 last_debug = time.time()
                 debug_reasons = {}
             if found == 0 and (time.time() - last_hunt) >= 1800:
-                send_telegram(f"👀 *Still Hunting - V34.6...*\n\nNo 50+ yet.\nBest: {best_pair} - {best_score}/180\nEAT {now.strftime('%H:%M')}")
+                send_telegram(f"Still Hunting - V34.7...\n\nNo 50+ yet.\nBest: {best_pair} - {best_score}/180\nEAT {now.strftime('%H:%M')}")
                 last_hunt = time.time()
             if len(sent) > 200:
                 sent.clear()
             gc.collect()
+            print("Sleeping 60s...", flush=True)
             time.sleep(60)
         except Exception as e:
             print(f"Loop crash, retry 10s: {e}", flush=True)
@@ -486,4 +496,7 @@ def bot_loop():
             time.sleep(10)
 
 if __name__ == "__main__":
-    threading.Thread(target=heartbeat
+    threading.Thread(target=heartbeat, daemon=True).start()
+    threading.Thread(target=bot_loop, daemon=True).start()
+    print("V34.7 CLEAN - Flask is now MAIN thread, Bot is background", flush=True)
+    run_web()
