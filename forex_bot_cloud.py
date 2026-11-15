@@ -7,17 +7,17 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "V35.3 SMART+ ALIVE", 200
+    return "V35.3.1 SMART+ TEST MODE ALIVE", 200
 @app.route('/health')
 def health():
     return "OK", 200
 @app.route('/<path:path>')
 def catch_all(path):
-    return "V35.3 SMART+ ALIVE", 200
+    return "V35.3.1 SMART+ TEST MODE ALIVE", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    print(f"V35.3 Flask on {port}", flush=True)
+    print(f"V35.3.1 Flask on {port}", flush=True)
     app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -37,13 +37,13 @@ MAX_RISK = {
 }
 PAIR_BONUS = {
     "GBPUSD": 5, "EURUSD": 5, "XAUUSD": 5,
-    "GBPJPY": 0, "US30": 0,  # SMART+: No penalty anymore, only bonus. No signals lost.
+    "GBPJPY": 0, "US30": 0,
     "EURJPY": 0, "USDJPY": 0, "AUDUSD": 0, "USDCAD": 0, "NZDUSD": 0, "USDCHF": 0, "EURGBP": 0,
 }
 
 PAIR_COOLDOWN_UNTIL = {}
 LAST_SIGNAL_PRICE = {}
-PAIR_SIGNAL_COUNT = {}  # SMART+: Track repeats
+PAIR_SIGNAL_COUNT = {}
 
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -144,7 +144,6 @@ def is_news_time(now):
     if now.weekday()==4 and now.day<=7 and 15.0 <= (now.hour + now.minute/60.0) < 17.0: return True
     return False
 
-# SMART+: Session label, NOT block. 09-21 all allowed.
 def get_session_label(now):
     hour = now.hour + now.minute/60.0
     if 9.0 <= hour < 12.0: return "LONDON PRIME", True
@@ -181,7 +180,6 @@ def analyze(name, ysym, now):
         trend="SELL"; score+=20; details.append("EMA 50+200 SELL +20")
     else:
         return {"fail":True,"score":score,"reason":f"EMA fail {price:.5f} vs {e50:.5f}/{e200:.5f}","trend":"NONE"}
-    # SMART+: ADDITIVE ONLY - No -5 penalties. Bonus only.
     if htf is not None and htf==trend:
         score+=5; details.append(f"1H Agrees {htf} +5"); tags.append("1H AGREE")
     elif htf is not None and htf!=trend:
@@ -195,7 +193,6 @@ def analyze(name, ysym, now):
     pb = PAIR_BONUS.get(name, 0)
     if pb!=0:
         score+=pb; details.append(f"Pair Bonus {name} +{pb}")
-    # SMART+: Session - Bonus only, never subtract
     sess_label, is_prime = get_session_label(now)
     if is_prime:
         score+=5; details.append(f"{sess_label} +5 - PRIME"); tags.append("PRIME SESSION"); smart_notes.append(sess_label)
@@ -206,23 +203,20 @@ def analyze(name, ysym, now):
     if trend=="BUY" and r>80: return {"fail":True,"score":score,"reason":f"RSI {r:.1f} extreme","trend":trend,"details":details}
     if trend=="SELL" and r<20: return {"fail":True,"score":score,"reason":f"RSI {r:.1f} extreme","trend":trend,"details":details}
     details.append(f"RSI {r:.1f}")
-    # SMART+: RSI Tag
     if r>70 and trend=="BUY": tags.append("REVERSAL RISK - RSI High")
     if r<30 and trend=="SELL": tags.append("REVERSAL RISK - RSI Low")
     atr_val=atr_calc(h5,l5,c5,14)
     if atr_val<=0: atr_val=abs(price*0.001)
-    # SMART+: Adaptive Threshold - Based on volatility, not fixed 80
     atr_ratio = atr_val / price if price!=0 else 0.001
     if atr_ratio > 0.0015:
-        threshold = 78  # Volatile day - easier, more signals
+        threshold = 78
         tags.append("HIGH MOMENTUM - Volatile Day"); details.append(f"Adaptive Threshold 78 - Volatile")
     elif atr_ratio < 0.0008:
-        threshold = 82  # Quiet day - harder, fewer fakes
+        threshold = 82
         tags.append("LOW VOLUME - Quiet Day"); details.append(f"Adaptive Threshold 82 - Quiet")
     else:
         threshold = 80
         tags.append("NORMAL MOMENTUM"); details.append(f"Adaptive Threshold 80 - Normal")
-    # SMART+: Chop - TAG, not BLOCK (V35.3 keeps signals)
     last_8_range = max(h15[-8:]) - min(l15[-8:])
     is_chop = last_8_range / price < 0.004
     if is_chop:
@@ -232,7 +226,6 @@ def analyze(name, ysym, now):
         details.append(f"Chop OK - Range {last_8_range:.5f}")
     if name=="XAUUSD" and atr_val>6.0:
         return {"fail":True,"score":score,"reason":f"Gold ATR too high {atr_val:.2f}","trend":trend,"details":details}
-    # Anti-Chase - TAG only
     last3=c5[-1]-c5[-4]; chase=False
     if trend=="BUY" and last3>atr_val*0.6:
         chase=True; warnings.append("CHASE"); details.append("CHASE - Use LIMIT"); tags.append("CHASE - Use Limit")
@@ -331,25 +324,21 @@ def analyze(name, ysym, now):
             if m1_ok: score+=10; details.append("1m Rejection CONFIRM +10 BONUS"); smart_notes.append("1m Confirm")
             else: details.append("1m No confirm")
         except: details.append("1m Error")
-    # SMART+: Repeat Tag - If pair already gave signals, tag it, don't block
     repeat_count = PAIR_SIGNAL_COUNT.get(name, 0)
     if repeat_count >= 2:
         tags.append(f"REPEAT - {repeat_count}th signal today, be careful")
     raw_score=score; score=min(score,120)
     print(f"{name} {trend} Score {score}/120 Raw {raw_score} Thr {threshold} RSI {r:.1f} OB {ob_type} FVG {fvg_ok} 1m {m1_ok} Tags {tags}", flush=True)
-    # SMART+: Adaptive threshold + Watch
-    if score < threshold - 10:  # Watch is threshold -10
+    if score < threshold - 10:
         return {"fail":True,"score":score,"reason":f"Score {score} < Watch {threshold-10}","trend":trend,"details":details,"threshold":threshold}
     if score < threshold:
         return {"watch":True,"score":score,"trend":trend,"details":details,"symbol":name,"live_price":round(float(current),5),"rsi":round(float(r),1),"htf":htf,"htf4":htf4,"smart_notes":smart_notes,"ob_type":ob_type,"tags":tags,"threshold":threshold,"sess_label":sess_label}
     conf=sum([1 for x in [bos_ok,sweep_ok,fvg_ok,ob_ok] if x])
-    # SMART+: Tiering - S-TIER 90+, A-TIER 80-89, no quality block that kills signals unless really bad
     if score>=90 and conf>=3 and not chase and (fvg_inside or ob_inside) and rej and m1_ok:
         tier="S-TIER SCALP"; tier_label="S"; take_it="YES - BEST SIGNAL - Take it"
     elif score>=80 and conf>=3 and not chase:
         tier="A-TIER SCALP"; tier_label="A"; take_it="YES - SCALP 0.01 only"
     elif score>=threshold and conf>=2:
-        # SMART+: Still send, but as B-TIER, not block. Keeps signals.
         tier="B-TIER SCALP"; tier_label="B"; take_it="CAUTION - Smaller / Skip if unsure"
     else:
         return {"fail":True,"score":score,"reason":f"Quality Gate FAIL - Need 2/4, got {conf}/4","trend":trend,"details":details,"threshold":threshold}
@@ -383,20 +372,41 @@ def analyze(name, ysym, now):
     return {"symbol":name,"trend":trend,"order_type":order_type,"entry":round(float(entry),5),"sl":round(float(sl),5),"tp1":round(float(tp1),5),"tp2":round(float(tp2),5),"score":score,"confidence":conf_pct,"details":details,"tier":tier,"tier_label":tier_label,"take_it":take_it,"live_price":round(float(current),5),"rsi":round(float(r),1),"htf":htf,"htf4":htf4,"entry_type":entry_type,"ob_type":ob_type,"ob_quality":ob_quality,"ob_top":round(float(ob_top),5) if ob_ok else 0,"ob_bottom":round(float(ob_bottom),5) if ob_ok else 0,"warnings":warnings,"chase":chase,"fvg_inside":fvg_inside,"rejection":rej,"inval":round(float(sl),5),"smart_notes":smart_notes,"sl_mult":sl_mult,"sweep_level":sweep_level if sweep_ok else "None","m1_ok":m1_ok,"tags":tags,"threshold":threshold,"sess_label":sess_label,"is_chop":is_chop,"is_prime":is_prime}
 
 def bot_loop():
-    send_telegram("V35.3 SMART+ LIVE\n12 Pairs | Adaptive Threshold 78-82 | S-TIER 90+ / A-TIER 80+ / B-TIER / WATCH\nSMART+: Additive Only - No Penalties | Tags Not Blocks\nSCALPER: TP 0.8R + 1.5R | Max Hold 20m | 1m Confirm\nSessions: 09-21 EAT - PRIME vs CHOP Label, Not Block | GOLD 11-19\nSMART: Chop Tag + Asia/Yesterday Sweep + Memory + Adaptive SL + Repeat Tag")
+    send_telegram("V35.3.1 SMART+ TEST MODE LIVE\n12 Pairs | Adaptive Threshold 78-82 | S-TIER 90+ / A-TIER 80+ / B-TIER / WATCH\nSMART+: Additive Only - No Penalties | Tags Not Blocks\nSCALPER: TP 0.8R + 1.5R | Max Hold 20m | 1m Confirm\nSessions: 09-21 EAT - PRIME vs CHOP Label, Not Block | GOLD 11-19\nTEST MODE: On Weekend, bot does dry-run analysis every 60s so you see it in logs")
     sent=set(); last_hunt=time.time(); last_sent_time={}; last_debug=time.time(); debug_reasons={}
     watch_sent=set()
     while True:
         try:
             tz=pytz.timezone("Africa/Nairobi"); now=dt.now(tz); hour=now.hour+now.minute/60.0
+            # --- WEEKEND TEST MODE: Analyze so you SEE it working ---
             if now.weekday()>=5:
-                print(f"WEEKEND {now} - Market closed, sleeping", flush=True); time.sleep(300); continue
+                print(f"WEEKEND {now} - Market closed, but TEST MODE: Doing dry-run analysis", flush=True)
+                try:
+                    # Test 3 pairs to show analyzing - rotates each minute
+                    test_pairs = ["EURUSD", "GBPUSD", "XAUUSD"]
+                    # Pick based on minute so it rotates
+                    pick = test_pairs[now.minute % len(test_pairs)]
+                    ysym = SYMBOLS[pick]
+                    print(f"TEST ANALYSIS: Checking {pick}...", flush=True)
+                    res = analyze(pick, ysym, now)
+                    print(f"TEST ANALYSIS {pick}: {res}", flush=True)
+                    # Also send a Telegram test update every 30 mins so you see it
+                    if now.minute % 30 == 0 and now.second < 65:
+                        if res and not res.get("fail"):
+                            send_telegram(f"TEST MODE - Weekend Dry Run\n\nPair: {pick}\nScore: {res.get('score')}/120\nTier: {res.get('tier')}\nTrend: {res.get('trend')}\nThis is TEST only, market closed. Real signals start Monday 09:00 EAT.")
+                        elif res and res.get("watch"):
+                            send_telegram(f"TEST MODE - Weekend Dry Run\n\nPair: {pick}\nScore: {res.get('score')}/120 - WATCH\nTrend: {res.get('trend')}\nThis is TEST only. Real signals start Monday 09:00 EAT.")
+                        else:
+                            send_telegram(f"TEST MODE - Weekend Dry Run\n\nPair: {pick}\nScore: {res.get('score',0)}/120 - {res.get('reason','No setup')}\nBot is analyzing correctly. Real signals start Monday 09:00 EAT.")
+                except Exception as e:
+                    print(f"TEST FAILED: {e}", flush=True); traceback.print_exc()
+                time.sleep(60); continue
             if not (9.0<=hour<21.0):
-                print(f"OUT OF SESSION {now} - alive, sleeping", flush=True); time.sleep(60); continue
+                print(f"OUT OF SESSION {now} - alive, sleeping 60s", flush=True); time.sleep(60); continue
             if is_news_time(now):
                 print(f"NEWS TIME {now} - blocked, sleeping", flush=True); time.sleep(300); continue
             sess_label, is_prime = get_session_label(now)
-            print(f"V35.3 SMART+ checking {now} Session {sess_label}", flush=True)
+            print(f"V35.3.1 SMART+ checking {now} Session {sess_label}", flush=True)
             found=0; best_score=0; best_pair="None"
             for name, ysym in SYMBOLS.items():
                 try:
@@ -424,7 +434,6 @@ def bot_loop():
                         warn_txt="\n".join([f"WARNING: {w}" for w in res.get('warnings',[])]) if res.get('warnings') else "No warnings"
                         smart_txt=", ".join(res.get('smart_notes',[])) or "None"
                         tags_txt=" | ".join(res.get('tags',[])) or "None"
-                        # SMART+: Lot advice based on tier + tags
                         if res['tier_label']=="S": lot_advice="Lot: 0.01 - BEST SIGNAL"
                         elif res['tier_label']=="A": lot_advice="Lot: 0.01 ONLY"
                         else: lot_advice="Lot: 0.01 - B-TIER - Consider skipping if unsure"
@@ -440,10 +449,10 @@ def bot_loop():
                     print(f"Error {name}: {e}", flush=True); traceback.print_exc()
             if (time.time()-last_debug)>=1800:
                 dbg="\n".join([f"{k}: {v}" for k,v in debug_reasons.items()])
-                send_telegram(f"V35.3 Debug - Alive - {sess_label}\n\n{dbg}\nBest: {best_pair} {best_score}/120\nEAT {now.strftime('%H:%M')}")
+                send_telegram(f"V35.3.1 Debug - Alive - {sess_label}\n\n{dbg}\nBest: {best_pair} {best_score}/120\nEAT {now.strftime('%H:%M')}")
                 last_debug=time.time(); debug_reasons={}; watch_sent.clear()
             if found==0 and (time.time()-last_hunt)>=1800:
-                send_telegram(f"Still Hunting SCALPS - V35.3 SMART+...\n\nNo S/A yet. Session: {sess_label}\nBest: {best_pair} - {best_score}/120\nEAT {now.strftime('%H:%M')}")
+                send_telegram(f"Still Hunting SCALPS - V35.3.1 SMART+...\n\nNo S/A yet. Session: {sess_label}\nBest: {best_pair} - {best_score}/120\nEAT {now.strftime('%H:%M')}")
                 last_hunt=time.time()
             if len(sent)>200: sent.clear()
             gc.collect(); print("Sleeping 60s...", flush=True); time.sleep(60)
@@ -453,5 +462,5 @@ def bot_loop():
 if __name__=="__main__":
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
-    print("V35.3 SMART+ - Flask is now MAIN thread, Bot is background", flush=True)
+    print("V35.3.1 SMART+ TEST MODE - Flask is now MAIN thread, Bot is background", flush=True)
     run_web()
