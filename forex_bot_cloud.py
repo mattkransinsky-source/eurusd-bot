@@ -2,7 +2,6 @@ import os, time, requests, threading, pytz, gc, traceback, json, csv
 from datetime import datetime as dt, timedelta
 import yfinance as yf
 from flask import Flask
-
 app = Flask(__name__)
 @app.route('/')
 def home(): return "V38.8 ALIVE", 200
@@ -13,13 +12,11 @@ def catch_all(path): return "V38.8 ALIVE", 200
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_USER_ID = os.getenv("TELEGRAM_USER_ID")
 TRADE_HISTORY_FILE = os.getenv("TRADE_FILE", "trade_history.json")
 FEATURE_LOG = os.getenv("FEATURE_FILE", "feature_log.csv")
-
 SYMBOLS = {"XAUUSD":"GC=F","GBPJPY":"GBPJPY=X","US30":"YM=F","GBPUSD":"GBPUSD=X","EURUSD":"EURUSD=X","EURJPY":"EURJPY=X","USDJPY":"USDJPY=X","AUDUSD":"AUDUSD=X","USDCAD":"USDCAD=X","NZDUSD":"NZDUSD=X","USDCHF":"USDCHF=X","EURGBP":"EURGBP=X"}
 MAX_RISK = {"XAUUSD":12.0,"GBPJPY":0.8,"US30":120.0,"GBPUSD":0.005,"EURUSD":0.005,"EURJPY":0.8,"USDJPY":0.8,"AUDUSD":0.005,"USDCAD":0.005,"NZDUSD":0.005,"USDCHF":0.005,"EURGBP":0.005}
 MIN_SL = {"XAUUSD":3.0,"GBPJPY":0.12,"US30":40.0,"GBPUSD":0.00080,"EURUSD":0.00080,"EURJPY":0.12,"USDJPY":0.12,"AUDUSD":0.00080,"USDCAD":0.00080,"NZDUSD":0.00080,"USDCHF":0.00080,"EURGBP":0.00080}
@@ -32,7 +29,6 @@ MAX_SHADOW_PER_DAY = 999
 COOLDOWN_MIN = 15
 EXPOSURE = {"USD": ["EURUSD","GBPUSD","AUDUSD","NZDUSD","USDCAD","USDCHF","USDJPY"], "JPY": ["GBPJPY","EURJPY","USDJPY"], "EUR": ["EURUSD","EURJPY","EURGBP"], "GBP": ["GBPUSD","GBPJPY","EURGBP"], "GOLD": ["XAUUSD"], "US30": ["US30"]}
 CAT_CAPS = {"STRUCTURE":50,"TREND":25,"MOMENTUM":25,"CONTEXT":20}
-
 PAIR_COOLDOWN_UNTIL = {}
 PAIR_SIGNAL_COUNT = {}
 PRICE_LEVEL_WINS = {}
@@ -59,7 +55,6 @@ TOTAL_SHADOW_TODAY = 0
 OFFSETS = {"XAUUSD":0.0,"US30":0.0}
 CACHE = {"4h":{},"cache_time":{}}
 CACHE_LOCK = threading.Lock()
-
 def save_outcomes():
     try:
         data = {"price_wins":PRICE_LEVEL_WINS,"price_losses":PRICE_LEVEL_LOSSES,"user_wins":USER_REPORTED_WINS,"user_losses":USER_REPORTED_LOSSES,"outcomes":OUTCOME_LOG[-200:],"veto_log":VETO_LOG[-200:],"price_outcomes":PRICE_OUTCOMES[-200:],"user_outcomes":USER_OUTCOMES[-200:],"active":ACTIVE_TRADES,"pending_reports":PENDING_USER_REPORTS,"shadow":SHADOW_TRADES,"shadow_outcomes":SHADOW_OUTCOMES[-200:],"offset":TELEGRAM_OFFSET,"last_processed":LAST_PROCESSED_1M,"trade_counter":TRADE_COUNTER,"completed_ids":list(COMPLETED_TRADE_IDS),"last_reset":LAST_RESET_DATE,"signal_count":PAIR_SIGNAL_COUNT,"cooldown":PAIR_COOLDOWN_UNTIL,"total_today":TOTAL_SIGNALS_TODAY,"shadow_today":TOTAL_SHADOW_TODAY,"offsets":OFFSETS,"pair_loss_today":PAIR_LOSS_TODAY}
@@ -447,21 +442,18 @@ def poll_telegram_loop():
             save_outcomes()
         except Exception as e: print(f"Poll error {e}",flush=True)
         time.sleep(3)
-        def check_active_trades_loop():
+def check_active_trades_loop():
     while True:
         try:
             tz=pytz.timezone("Africa/Nairobi"); now=dt.now(tz)
             cleanup_pending_reports(); check_active_trades(now); check_shadow_trades(now)
         except Exception as e: print(f"Track error {e}",flush=True)
         time.sleep(10)
-
 def _almost_tp_thresholds(pair):
-    # returns (near_tp_dist, pullback_dist) in price units
     if pair=="XAUUSD": return 0.30, 0.40
     if pair=="US30": return 3.0, 4.0
     if pair in ("GBPJPY","EURJPY","USDJPY"): return 0.03, 0.04
     return 0.00030, 0.00040
-
 def check_shadow_trades(now):
     global SHADOW_TRADES, SHADOW_OUTCOMES
     if not SHADOW_TRADES: return
@@ -470,7 +462,6 @@ def check_shadow_trades(now):
         try:
             ysym=SYMBOLS.get(t["pair"])
             if not ysym: continue
-            # Backwards compat: old saved trades used tp1/tp2
             if "tp" not in t and "tp1" in t: t["tp"]=t["tp1"]
             tp=t.get("tp", t.get("tp1"))
             if t.get("status")=="SHADOW_PENDING":
@@ -524,7 +515,6 @@ def check_shadow_trades(now):
                 continue
         except Exception as e: print(f"Shadow error {e}",flush=True); remaining.append(t)
     SHADOW_TRADES=remaining; save_outcomes()
-
 def check_active_trades(now):
     global ACTIVE_TRADES,PENDING_USER_REPORTS
     if not ACTIVE_TRADES: return
@@ -614,12 +604,10 @@ def check_active_trades(now):
                     high=float(row['High']); low=float(row['Low']); close=float(row['Close'])
                     entry=trade["entry"]; sl=trade["sl"]; tp=trade["tp"]; trend=trade["trend"]
                     be_done=trade.get("be_done", False); effective_sl=entry if be_done else sl
-                    # V38.8: Track best favourable for Almost TP alert
                     if trend=="BUY":
                         trade["best_favorable"]=max(trade.get("best_favorable",entry), high)
                     else:
                         trade["best_favorable"]=min(trade.get("best_favorable",entry), low)
-                    # V38.8: Almost TP Alert - within 3 pips of TP then drops 4 pips
                     if not trade.get("almost_tp_alerted", False):
                         near_d, pull_d = _almost_tp_thresholds(name)
                         if trend=="BUY":
@@ -652,7 +640,6 @@ def check_active_trades(now):
                     else: remaining.append(trade)
         except Exception as e: print(f"Check error {e}",flush=True); remaining.append(trade)
     ACTIVE_TRADES[:]=remaining; PENDING_USER_REPORTS[:]=new_pending; save_outcomes()
-
 def analyze(name,ysym,now,dfs=None):
     if dfs is None:
         df_4h=get_4h_from_1h(ysym); df_1h=get_data(ysym,"1h","10d"); df_15m=get_data(ysym,"15m","10d"); df_5m=get_data(ysym,"5m","2d"); df_1m=get_data(ysym,"1m","1d"); df_1d=get_data_cached(ysym,"1d","60d",cache_key=f"{ysym}_1d"); df_1w=get_data_cached(ysym,"1wk","6mo",cache_key=f"{ysym}_1w")
@@ -883,23 +870,19 @@ def analyze(name,ysym,now,dfs=None):
     if risk<=0: return {"fail":True,"hard":True,"score":capped,"reason":"Risk <=0","trend":trend,"flags":flags}
     if name in YAHOO_PROXY_PAIRS: risk = risk * 1.2
     off = OFFSETS.get(name,0.0); entry_b = entry + off; sl_b = sl + off
-    # V38.8: SINGLE TP ONLY = 0.7R - NO TP1 / TP2
     tp_b = entry_b + risk*0.7 if trend=="BUY" else entry_b - risk*0.7
     spread = SPREAD.get(name,0)
     eff_risk = risk + spread
     eff_tp_dist = risk*0.7 - spread
     net_rr = (eff_tp_dist / eff_risk) if eff_risk>0 else 0
-    # A 0.7R gross target cannot meet the old 1.0 net-RR gate; use a 0.50 net floor.
     if net_rr < 0.50: flags.append("LOW_NET_RR"); details.append(f"FLAG Net R:R {net_rr:.2f} < 0.50")
     if risk>0 and spread/risk > 0.30: flags.append("SPREAD_HIGH"); details.append(f"FLAG Spread {spread:.5f} >30% of risk {risk:.5f}")
-    # V38.8: 2-TIER MAX_RISK - slightly wide = flag, insanely wide = hard block
     max_r=MAX_RISK.get(name,9999)
     if risk > max_r*1.5:
         return {"fail":True,"hard":True,"score":capped,"reason":f"HARD SL Cap {risk:.5f} > {max_r*1.5:.5f} - Insane","trend":trend,"flags":flags,"details":details}
     if risk > max_r:
         flags.append("SL_WIDE"); details.append(f"SL Wide {risk:.5f} > {max_r} - 0.01 only")
     if risk/entry>0.01: return {"fail":True,"hard":True,"score":capped,"reason":"HARD SL too wide","trend":trend,"flags":flags,"details":details}
-    # V38.8: MIN_SL = flag only, never hard block
     min_sl = MIN_SL.get(name, 0.00040)
     if risk < min_sl:
         flags.append("SL_TIGHT"); details.append(f"SL Tight {risk:.5f} < {min_sl} - 0.01 only")
@@ -911,7 +894,6 @@ def analyze(name,ysym,now,dfs=None):
     else: tier="SHADOW"; tier_label="SH"; take_it="Shadow only"
     log_features({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trend":trend,"score":final_score,"raw_score":raw_score,"capped":capped,"tier":tier_label,"flags":"|".join(flags),"rsi":round(float(r),1),"adx":adx_val,"vwap":round(float(vwap_val),2),"htf":htf,"htf4":htf4,"sess":sess_label,"structure":structure_tag,"sweep":sweep_level if sweep_ok else "None","ob":ob_type,"fvg":fvg_fresh,"entry":round(float(entry_b),5),"sl":round(float(sl_b),5),"tp":round(float(tp_b),5),"risk":round(float(risk),5),"net_rr":round(float(net_rr),2)})
     return {"symbol":name,"trend":trend,"order_type":order_type,"entry":round(float(entry_b),5),"tech_entry":round(float(tech_entry+off),5),"monitor_entry":round(float(monitor_entry+off),5),"sl":round(float(sl_b),5),"tp":round(float(tp_b),5),"score":final_score,"raw_score":raw_score,"capped":capped,"cats":cat,"details":details,"tier":tier,"tier_label":tier_label,"take_it":take_it,"live_price":round(float(current+off),5),"rsi":round(float(r),1),"htf":htf,"htf4":htf4,"entry_type":entry_type,"ob_type":ob_type,"ob_quality":ob_quality,"warnings":warnings,"chase":chase,"fvg_inside":fvg_inside,"fvg_fresh":fvg_fresh,"sl_mult":SL_ATR_MULT,"sweep_level":sweep_level if sweep_ok else "None","m1_ok":m1_ok,"tags":tags,"sess_label":sess_label,"is_prime":is_prime,"trend_strength":round(float(trend_strength),0),"trend_label":trend_label,"structure_tag":structure_tag,"adx":adx_val,"vol_label":vol_label,"daily_label":daily_label,"weekly_label":weekly_label,"risk_dist":round(float(risk),5),"vwap":round(float(vwap_val),5),"offset":off,"flags":flags,"atr":atr_val,"net_rr":round(float(net_rr),2)}
-
 def bot_loop():
     global TOTAL_SIGNALS_TODAY, TOTAL_SHADOW_TODAY
     load_outcomes()
@@ -986,7 +968,6 @@ def bot_loop():
             if len(sent)>200: sent.clear()
             gc.collect(); time.sleep(60)
         except Exception as e: print(f"Loop crash {e}",flush=True); traceback.print_exc(); time.sleep(10)
-
 if __name__=="__main__":
     load_outcomes()
     threading.Thread(target=heartbeat,daemon=True).start()
