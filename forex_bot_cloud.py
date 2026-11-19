@@ -5,11 +5,11 @@ from flask import Flask
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "V38.6 ALIVE", 200
+def home(): return "V38.8 ALIVE", 200
 @app.route('/health')
 def health(): return "OK", 200
 @app.route('/<path:path>')
-def catch_all(path): return "V38.6 ALIVE", 200
+def catch_all(path): return "V38.8 ALIVE", 200
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
@@ -405,7 +405,7 @@ def poll_telegram_loop():
                     if p.startswith("T") and len(p)>=4 and p[1:].isdigit(): tid=p; break
                 if cmd=="PING":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
-                    send_telegram("✅ PONG - V38.6 2-Tier SL")
+                    send_telegram("✅ PONG - V38.8 2-Tier SL")
                 elif cmd=="RESET_OFFSET":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
                     TELEGRAM_OFFSET=0; send_telegram("✅ Offset reset")
@@ -417,7 +417,7 @@ def poll_telegram_loop():
                 elif cmd=="STATUS":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
                     last = "\n".join([f"{v.get('pair')} {v.get('reason')}" for v in VETO_LOG[-3:]]) if VETO_LOG else "None"
-                    txt=f"V38.6 STATUS\nSignals {TOTAL_SIGNALS_TODAY}/999 | Shadow {TOTAL_SHADOW_TODAY}/999\nActive {len(ACTIVE_TRADES)} | Shadow active {len(SHADOW_TRADES)}\nOffsets {OFFSETS}\nPair loss today {PAIR_LOSS_TODAY}\nLast hard blocks:\n{last}"
+                    txt=f"V38.8 STATUS\nSignals {TOTAL_SIGNALS_TODAY}/999 | Shadow {TOTAL_SHADOW_TODAY}/999\nActive {len(ACTIVE_TRADES)} | Shadow active {len(SHADOW_TRADES)}\nOffsets {OFFSETS}\nPair loss today {PAIR_LOSS_TODAY}\nLast hard blocks:\n{last}"
                     send_telegram(txt)
                 elif cmd=="STATS":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
@@ -425,7 +425,7 @@ def poll_telegram_loop():
                     wr=round(wins/total*100,1) if total>0 else 0
                     rs=[o.get("r") for o in PRICE_OUTCOMES if o.get("r") is not None]
                     avg_r=round(sum(rs)/len(rs),2) if rs else 0
-                    txt=f"📊 V38.6 STATS\nUser: {wins}W / {losses}L = {wr}% WR\nPrice Avg R {avg_r}\nNeed ~45-50% to break even\n\nSHADOW:\n"
+                    txt=f"📊 V38.8 STATS\nUser: {wins}W / {losses}L = {wr}% WR\nPrice Avg R {avg_r}\nNeed ~45-50% to break even\n\nSHADOW:\n"
                     from collections import defaultdict
                     by_flag=defaultdict(list)
                     for s in SHADOW_OUTCOMES:
@@ -447,13 +447,21 @@ def poll_telegram_loop():
             save_outcomes()
         except Exception as e: print(f"Poll error {e}",flush=True)
         time.sleep(3)
-def check_active_trades_loop():
+        def check_active_trades_loop():
     while True:
         try:
             tz=pytz.timezone("Africa/Nairobi"); now=dt.now(tz)
             cleanup_pending_reports(); check_active_trades(now); check_shadow_trades(now)
         except Exception as e: print(f"Track error {e}",flush=True)
         time.sleep(10)
+
+def _almost_tp_thresholds(pair):
+    # returns (near_tp_dist, pullback_dist) in price units
+    if pair=="XAUUSD": return 0.30, 0.40
+    if pair=="US30": return 3.0, 4.0
+    if pair in ("GBPJPY","EURJPY","USDJPY"): return 0.03, 0.04
+    return 0.00030, 0.00040
+
 def check_shadow_trades(now):
     global SHADOW_TRADES, SHADOW_OUTCOMES
     if not SHADOW_TRADES: return
@@ -462,14 +470,17 @@ def check_shadow_trades(now):
         try:
             ysym=SYMBOLS.get(t["pair"])
             if not ysym: continue
+            # Backwards compat: old saved trades used tp1/tp2
+            if "tp" not in t and "tp1" in t: t["tp"]=t["tp1"]
+            tp=t.get("tp", t.get("tp1"))
             if t.get("status")=="SHADOW_PENDING":
                 df=get_data(ysym,"1m","1d")
                 if df is None or len(df)==0: remaining.append(t); continue
                 df_c=df.iloc[:-1] if len(df)>1 else df
                 last_close=float(df_c['Close'].iloc[-1])
-                if t["trend"]=="BUY" and last_close>=t["tp1"]:
-                    SHADOW_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":t["pair"],"trade_id":t.get("shadow_id"),"flags":t.get("flags",[]),"result":"SHADOW STALE - TP1 before fill","r":0}); continue
-                if t["trend"]=="SELL" and last_close<=t["tp1"]:
+                if t["trend"]=="BUY" and last_close>=tp:
+                    SHADOW_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":t["pair"],"trade_id":t.get("shadow_id"),"flags":t.get("flags",[]),"result":"SHADOW STALE - TP before fill","r":0}); continue
+                if t["trend"]=="SELL" and last_close<=tp:
                     SHADOW_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":t["pair"],"trade_id":t.get("shadow_id"),"flags":t.get("flags",[]),"result":"SHADOW STALE","r":0}); continue
                 touched=False
                 for idx,row in df_c.iterrows():
@@ -494,22 +505,17 @@ def check_shadow_trades(now):
                     ts=idx.timestamp() if hasattr(idx,'timestamp') else 0
                     if ts<=last_ts: continue
                     high=float(row['High']); low=float(row['Low'])
-                    entry=t["entry"]; sl=t["sl"]; tp1=t["tp1"]; tp2=t["tp2"]
+                    entry=t["entry"]; sl=t["sl"]
                     if t["trend"]=="BUY":
-                        if high>=tp2:
-                            r_val=min((tp2-entry)/max(entry-sl,0.00001),1.5) if entry!=sl else 1.5
-                            SHADOW_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":t["pair"],"trade_id":t.get("shadow_id"),"flags":t.get("flags",[]),"result":"SHADOW TP2","r":round(r_val,2)}); done=True; break
+                        if high>=tp:
+                            SHADOW_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":t["pair"],"trade_id":t.get("shadow_id"),"flags":t.get("flags",[]),"result":"SHADOW TP 0.7R","r":0.7}); done=True; break
                         if low<=sl:
-                            r_val=0 if t.get("tp1_hit") else -1.0
-                            SHADOW_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":t["pair"],"trade_id":t.get("shadow_id"),"flags":t.get("flags",[]),"result":"SHADOW SL/BE","r":r_val}); done=True; break
-                        if high>=tp1: t["tp1_hit"]=True
+                            SHADOW_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":t["pair"],"trade_id":t.get("shadow_id"),"flags":t.get("flags",[]),"result":"SHADOW SL","r":-1.0}); done=True; break
                     else:
-                        if low<=tp2:
-                            r_val=min((entry-tp2)/max(sl-entry,0.00001),1.5) if entry!=sl else 1.5
-                            SHADOW_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":t["pair"],"trade_id":t.get("shadow_id"),"flags":t.get("flags",[]),"result":"SHADOW TP2","r":round(r_val,2)}); done=True; break
+                        if low<=tp:
+                            SHADOW_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":t["pair"],"trade_id":t.get("shadow_id"),"flags":t.get("flags",[]),"result":"SHADOW TP 0.7R","r":0.7}); done=True; break
                         if high>=sl:
-                            r_val=0 if t.get("tp1_hit") else -1.0
-                            SHADOW_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":t["pair"],"trade_id":t.get("shadow_id"),"flags":t.get("flags",[]),"result":"SHADOW SL/BE","r":r_val}); done=True; break
+                            SHADOW_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":t["pair"],"trade_id":t.get("shadow_id"),"flags":t.get("flags",[]),"result":"SHADOW SL","r":-1.0}); done=True; break
                     t["last_processed"]=ts
                 if not done:
                     if time.time()-t.get("touch_time",t["time"])>3600:
@@ -518,6 +524,7 @@ def check_shadow_trades(now):
                 continue
         except Exception as e: print(f"Shadow error {e}",flush=True); remaining.append(t)
     SHADOW_TRADES=remaining; save_outcomes()
+
 def check_active_trades(now):
     global ACTIVE_TRADES,PENDING_USER_REPORTS
     if not ACTIVE_TRADES: return
@@ -530,6 +537,7 @@ def check_active_trades(now):
         try:
             name=trade["pair"]; ysym=SYMBOLS.get(name)
             if not ysym: continue
+            if "tp" not in trade and "tp1" in trade: trade["tp"]=trade["tp1"]
             status=trade.get("status","PENDING_CONFIRM")
             if status=="PENDING_CONFIRM":
                 age=(time.time()-trade["time"])/60
@@ -540,12 +548,12 @@ def check_active_trades(now):
                         if atr_v>0 and abs(fresh-trade["entry"])>atr_v*1.0:
                             send_telegram(f"❌ STALE {name} {trade.get('trade_id')} Price moved >1 ATR from entry - Cancelled")
                             OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"STALE - >1 ATR","entry":trade["entry"]}); atomic_move(trade,"STALE - >1 ATR"); continue
-                        if trade["trend"]=="BUY" and fresh>=trade["tp1"]:
-                            send_telegram(f"❌ STALE {name} {trade.get('trade_id')} TP1 hit before fill - Cancelled")
-                            OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"STALE - TP1 before fill","entry":trade["entry"]}); atomic_move(trade,"STALE - TP1 before fill"); continue
-                        if trade["trend"]=="SELL" and fresh<=trade["tp1"]:
-                            send_telegram(f"❌ STALE {name} {trade.get('trade_id')} TP1 hit before fill - Cancelled")
-                            OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"STALE - TP1 before fill","entry":trade["entry"]}); atomic_move(trade,"STALE - TP1 before fill"); continue
+                        if trade["trend"]=="BUY" and fresh>=trade["tp"]:
+                            send_telegram(f"❌ STALE {name} {trade.get('trade_id')} TP hit before fill - Cancelled")
+                            OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"STALE - TP before fill","entry":trade["entry"]}); atomic_move(trade,"STALE - TP before fill"); continue
+                        if trade["trend"]=="SELL" and fresh<=trade["tp"]:
+                            send_telegram(f"❌ STALE {name} {trade.get('trade_id')} TP hit before fill - Cancelled")
+                            OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"STALE - TP before fill","entry":trade["entry"]}); atomic_move(trade,"STALE - TP before fill"); continue
                 except: pass
                 if age>10:
                     atomic_move(trade,"EXPIRED - No Confirm"); OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"EXPIRED - No Confirm","entry":trade["entry"]})
@@ -570,12 +578,12 @@ def check_active_trades(now):
                         if high>=trade["entry"] and close<trade["sl"]: touched=True; touch_row=row; touch_idx=idx; break
                 if touched:
                     if touch_row is not None:
-                        high_e=float(touch_row['High']); low_e=float(touch_row['Low']); entry_v=trade["entry"]; sl_v=trade["sl"]; tp1_v=trade["tp1"]
-                        if trade["trend"]=="BUY": same=(low_e<=sl_v) or (high_e>=tp1_v)
-                        else: same=(high_e>=sl_v) or (low_e<=tp1_v)
+                        high_e=float(touch_row['High']); low_e=float(touch_row['Low']); entry_v=trade["entry"]; sl_v=trade["sl"]; tp_v=trade["tp"]
+                        if trade["trend"]=="BUY": same=(low_e<=sl_v) or (high_e>=tp_v)
+                        else: same=(high_e>=sl_v) or (low_e<=tp_v)
                         if same:
                             send_telegram(f"⚠️ SAME CANDLE - {name} {trade.get('trade_id')} Check broker"); OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"SAME CANDLE UNVERIFIED","entry":entry_v}); atomic_move(trade,"SAME CANDLE UNVERIFIED"); continue
-                    trade["status"]="PRICE_TOUCHED"; trade["touch_time"]=time.time(); trade["entry_candle_ts"]=touch_idx.timestamp() if hasattr(touch_idx,'timestamp') else time.time(); trade["last_processed"]=trade["entry_candle_ts"]; LAST_PROCESSED_1M[name]=trade["last_processed"]
+                    trade["status"]="PRICE_TOUCHED"; trade["touch_time"]=time.time(); trade["entry_candle_ts"]=touch_idx.timestamp() if hasattr(touch_idx,'timestamp') else time.time(); trade["last_processed"]=trade["entry_candle_ts"]; trade["best_favorable"]=trade["entry"]; trade["almost_tp_alerted"]=False; LAST_PROCESSED_1M[name]=trade["last_processed"]
                     send_telegram(f"🔔 TOUCHED {name} {trade.get('trade_id')} Entry {trade['entry']}"); remaining.append(trade)
                 else:
                     confirm_t=trade.get("confirm_time",trade["time"]); age=(time.time()-confirm_t)/60
@@ -594,7 +602,7 @@ def check_active_trades(now):
                     if ts>last_ts: candles.append((idx,row))
                 if not candles:
                     touch_age=(time.time()-trade.get("touch_time",trade["time"]))/60
-                    if touch_age>20 and not trade.get("tp1_hit"):
+                    if touch_age>20:
                         send_telegram(f"⏰ TIMEOUT {name} {trade.get('trade_id')} Close or BE - Idea dead, don't hold 2h"); OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"TIMEOUT 20m","entry":trade["entry"]}); atomic_move(trade,"TIMEOUT 20m")
                     elif touch_age>60:
                         OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"WATCH EXPIRED","entry":trade["entry"]}); atomic_move(trade,"WATCH EXPIRED")
@@ -604,37 +612,47 @@ def check_active_trades(now):
                 for idx,row in candles:
                     if trade_done: break
                     high=float(row['High']); low=float(row['Low']); close=float(row['Close'])
-                    entry=trade["entry"]; sl=trade["sl"]; tp1=trade["tp1"]; tp2=trade["tp2"]; trend=trade["trend"]; tp1_hit=trade.get("tp1_hit",False)
+                    entry=trade["entry"]; sl=trade["sl"]; tp=trade["tp"]; trend=trade["trend"]
                     be_done=trade.get("be_done", False); effective_sl=entry if be_done else sl
-                    if trend=="BUY": tp1_t=high>=tp1; tp2_t=high>=tp2; sl_t=low<=effective_sl; be_t=low<=entry if tp1_hit else False
-                    else: tp1_t=low<=tp1; tp2_t=low<=tp2; sl_t=high>=effective_sl; be_t=high>=entry if tp1_hit else False
-                    if not tp1_hit:
-                        if tp1_t and sl_t:
-                            send_telegram(f"⚠️ TP1+SL SAME CANDLE {name} {trade.get('trade_id')} Check broker"); OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"TP1+SL UNVERIFIED","entry":entry}); atomic_move(trade,"TP1+SL UNVERIFIED"); trade_done=True; break
-                        if tp1_t and tp2_t:
-                            send_telegram(f"🎉 TP1+TP2 {name} {trade.get('trade_id')} Reply WIN"); PRICE_LEVEL_WINS[name]=PRICE_LEVEL_WINS.get(name,0)+1; PRICE_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"PRICE TP1+TP2","r":1.15,"source":"YAHOO"}); OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"TP1+TP2 SAME CANDLE","entry":entry,"r":1.15}); atomic_move(trade,"TP1+TP2 SAME CANDLE"); trade_done=True; break
-                        if tp1_t:
-                            trade["tp1_hit"]=True; send_telegram(f"🔔 TP1 HIT {name} {trade.get('trade_id')}\nClose 50% + Move SL to Entry NOW\nThen tap: BE {trade.get('trade_id')}", trade_id=trade.get('trade_id')); OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"TP1 HIT","entry":entry}); trade["last_processed"]=idx.timestamp() if hasattr(idx,'timestamp') else time.time(); LAST_PROCESSED_1M[name]=trade["last_processed"]; continue
-                        if sl_t:
-                            send_telegram(f"❌ SL HIT {name} {trade.get('trade_id')} Reply LOSS"); PRICE_LEVEL_LOSSES[name]=PRICE_LEVEL_LOSSES.get(name,0)+1; PAIR_COOLDOWN_UNTIL[name]=time.time()+7200; PRICE_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"PRICE SL","r":-1.0,"source":"YAHOO"}); OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"SL -1R","entry":entry,"r":-1.0}); atomic_move(trade,"SL -1R"); trade_done=True; break
-                        trade["last_processed"]=idx.timestamp() if hasattr(idx,'timestamp') else time.time(); LAST_PROCESSED_1M[name]=trade["last_processed"]
+                    # V38.8: Track best favourable for Almost TP alert
+                    if trend=="BUY":
+                        trade["best_favorable"]=max(trade.get("best_favorable",entry), high)
                     else:
-                        if tp2_t:
-                            send_telegram(f"🎉 TP2 HIT {name} {trade.get('trade_id')} Reply WIN"); PRICE_LEVEL_WINS[name]=PRICE_LEVEL_WINS.get(name,0)+1; PRICE_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"PRICE TP2","r":1.15,"source":"YAHOO"}); OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"TP2 +1.15R","entry":entry,"r":1.15}); atomic_move(trade,"TP2 +1.15R"); trade_done=True; break
-                        if be_t and be_done:
-                            send_telegram(f"⚠️ BACK TO ENTRY {name} {trade.get('trade_id')} Reply WIN/LOSS"); OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"BE AFTER TP1","entry":entry}); atomic_move(trade,"BE AFTER TP1"); trade_done=True; break
-                        if sl_t:
-                            send_telegram(f"⚠️ SL HIT {name} {trade.get('trade_id')} Check broker - BE={be_done}"); OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"SL AFTER TP1","entry":entry}); atomic_move(trade,"SL AFTER TP1"); trade_done=True; break
-                        trade["last_processed"]=idx.timestamp() if hasattr(idx,'timestamp') else time.time(); LAST_PROCESSED_1M[name]=trade["last_processed"]
+                        trade["best_favorable"]=min(trade.get("best_favorable",entry), low)
+                    # V38.8: Almost TP Alert - within 3 pips of TP then drops 4 pips
+                    if not trade.get("almost_tp_alerted", False):
+                        near_d, pull_d = _almost_tp_thresholds(name)
+                        if trend=="BUY":
+                            dist_to_tp = tp - trade["best_favorable"]
+                            pullback = trade["best_favorable"] - close
+                            if dist_to_tp <= near_d and pullback >= pull_d:
+                                trade["almost_tp_alerted"]=True
+                                send_telegram(f"⚠️ CLOSE NOW - TP Rejected {name} {trade.get('trade_id')}\nPrice got within 3 pips of TP {tp} then dropped 4 pips. Close NOW, don't wait for SL.")
+                        else:
+                            dist_to_tp = trade["best_favorable"] - tp
+                            pullback = close - trade["best_favorable"]
+                            if dist_to_tp <= near_d and pullback >= pull_d:
+                                trade["almost_tp_alerted"]=True
+                                send_telegram(f"⚠️ CLOSE NOW - TP Rejected {name} {trade.get('trade_id')}\nPrice got within 3 pips of TP {tp} then dropped 4 pips. Close NOW, don't wait for SL.")
+                    if trend=="BUY": tp_t=high>=tp; sl_t=low<=effective_sl
+                    else: tp_t=low<=tp; sl_t=high>=effective_sl
+                    if tp_t and sl_t:
+                        send_telegram(f"⚠️ TP+SL SAME CANDLE {name} {trade.get('trade_id')} Check broker"); OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"TP+SL UNVERIFIED","entry":entry}); atomic_move(trade,"TP+SL UNVERIFIED"); trade_done=True; break
+                    if tp_t:
+                        send_telegram(f"🎉 TP HIT {name} {trade.get('trade_id')} Close FULL - Reply WIN"); PRICE_LEVEL_WINS[name]=PRICE_LEVEL_WINS.get(name,0)+1; PRICE_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"PRICE TP 0.7R","r":0.7,"source":"YAHOO"}); OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"TP +0.7R","entry":entry,"r":0.7}); atomic_move(trade,"TP +0.7R"); trade_done=True; break
+                    if sl_t:
+                        send_telegram(f"❌ SL HIT {name} {trade.get('trade_id')} Reply LOSS"); PRICE_LEVEL_LOSSES[name]=PRICE_LEVEL_LOSSES.get(name,0)+1; PAIR_COOLDOWN_UNTIL[name]=time.time()+7200; PRICE_OUTCOMES.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"PRICE SL","r":-1.0,"source":"YAHOO"}); OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"SL -1R","entry":entry,"r":-1.0}); atomic_move(trade,"SL -1R"); trade_done=True; break
+                    trade["last_processed"]=idx.timestamp() if hasattr(idx,'timestamp') else time.time(); LAST_PROCESSED_1M[name]=trade["last_processed"]
                 if not trade_done:
                     touch_age=(time.time()-trade.get("touch_time",trade["time"]))/60
-                    if touch_age>20 and not trade.get("tp1_hit"):
+                    if touch_age>20:
                         send_telegram(f"⏰ TIMEOUT {name} {trade.get('trade_id')} Close or BE - Idea dead"); OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"TIMEOUT","entry":trade["entry"]}); atomic_move(trade,"TIMEOUT")
                     elif touch_age>60:
                         OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade.get('trade_id'),"result":"WATCH EXPIRED","entry":trade["entry"]}); atomic_move(trade,"WATCH EXPIRED")
                     else: remaining.append(trade)
         except Exception as e: print(f"Check error {e}",flush=True); remaining.append(trade)
     ACTIVE_TRADES[:]=remaining; PENDING_USER_REPORTS[:]=new_pending; save_outcomes()
+
 def analyze(name,ysym,now,dfs=None):
     if dfs is None:
         df_4h=get_4h_from_1h(ysym); df_1h=get_data(ysym,"1h","10d"); df_15m=get_data(ysym,"15m","10d"); df_5m=get_data(ysym,"5m","2d"); df_1m=get_data(ysym,"1m","1d"); df_1d=get_data_cached(ysym,"1d","60d",cache_key=f"{ysym}_1d"); df_1w=get_data_cached(ysym,"1wk","6mo",cache_key=f"{ysym}_1w")
@@ -865,48 +883,23 @@ def analyze(name,ysym,now,dfs=None):
     if risk<=0: return {"fail":True,"hard":True,"score":capped,"reason":"Risk <=0","trend":trend,"flags":flags}
     if name in YAHOO_PROXY_PAIRS: risk = risk * 1.2
     off = OFFSETS.get(name,0.0); entry_b = entry + off; sl_b = sl + off
-    tp_candidates=[]
-    if trend=="BUY":
-        if y_high is not None and y_high>entry_b: tp_candidates.append(("Yesterday High", y_high))
-        if asia_high is not None and asia_high>entry_b: tp_candidates.append(("Asia High", asia_high))
-        swing = max(h15[-20:-1]) if len(h15)>=20 else None
-        if swing and swing>entry_b: tp_candidates.append(("Swing High", swing))
-    else:
-        if y_low is not None and y_low<entry_b: tp_candidates.append(("Yesterday Low", y_low))
-        if asia_low is not None and asia_low<entry_b: tp_candidates.append(("Asia Low", asia_low))
-        swing = min(l15[-20:-1]) if len(l15)>=20 else None
-        if swing and swing<entry_b: tp_candidates.append(("Swing Low", swing))
-    tp1_b=None; tp1_label="Fixed 0.8R"
-    if tp_candidates:
-        if trend=="BUY": nearest=min(tp_candidates, key=lambda x: x[1]-entry_b)
-        else: nearest=min(tp_candidates, key=lambda x: entry_b-x[1])
-        dist=abs(nearest[1]-entry_b)
-        if 0.4*risk <= dist <= 2.5*risk: tp1_b=nearest[1]; tp1_label=nearest[0]
-        elif dist < 0.4*risk:
-            sorted_c=sorted(tp_candidates, key=lambda x: abs(x[1]-entry_b)); found=False
-            for lbl, lvl in sorted_c[1:]:
-                d2=abs(lvl-entry_b)
-                if 0.4*risk <= d2 <= 2.5*risk: tp1_b=lvl; tp1_label=lbl; found=True; break
-            if not found: tp1_b = entry_b + risk*0.8 if trend=="BUY" else entry_b - risk*0.8; flags.append("TP1_TOO_CLOSE"); details.append("TP1 too close, using fixed")
-        else: tp1_b = entry_b + risk*0.8 if trend=="BUY" else entry_b - risk*0.8
-    else: tp1_b = entry_b + risk*0.8 if trend=="BUY" else entry_b - risk*0.8
-    tp2_b = entry_b + risk*1.5 if trend=="BUY" else entry_b - risk*1.5
-    tp2_unrealistic=False
-    if trend=="BUY" and y_high is not None and y_high < tp2_b and y_high > tp1_b: flags.append("TP2_UNREALISTIC"); details.append("TP2 beyond Yesterday High - Take TP1 only"); tp2_unrealistic=True
-    if trend=="SELL" and y_low is not None and y_low > tp2_b and y_low < tp1_b: flags.append("TP2_UNREALISTIC"); details.append("TP2 beyond Yesterday Low - Take TP1 only"); tp2_unrealistic=True
+    # V38.8: SINGLE TP ONLY = 0.7R - NO TP1 / TP2
+    tp_b = entry_b + risk*0.7 if trend=="BUY" else entry_b - risk*0.7
     spread = SPREAD.get(name,0)
-    eff_risk = risk + spread; eff_tp1_dist = abs(tp1_b - entry_b) - spread; eff_tp2_dist = abs(tp2_b - entry_b) - spread
-    net_rr = (eff_tp1_dist / eff_risk) if tp2_unrealistic else (eff_tp2_dist / eff_risk if eff_risk>0 else 0)
-    if net_rr < 1.0: flags.append("LOW_NET_RR"); details.append(f"FLAG Net R:R {net_rr:.2f} < 1.0")
+    eff_risk = risk + spread
+    eff_tp_dist = risk*0.7 - spread
+    net_rr = (eff_tp_dist / eff_risk) if eff_risk>0 else 0
+    # A 0.7R gross target cannot meet the old 1.0 net-RR gate; use a 0.50 net floor.
+    if net_rr < 0.50: flags.append("LOW_NET_RR"); details.append(f"FLAG Net R:R {net_rr:.2f} < 0.50")
     if risk>0 and spread/risk > 0.30: flags.append("SPREAD_HIGH"); details.append(f"FLAG Spread {spread:.5f} >30% of risk {risk:.5f}")
-    # V38.6: 2-TIER MAX_RISK - slightly wide = flag, insanely wide = hard block
+    # V38.8: 2-TIER MAX_RISK - slightly wide = flag, insanely wide = hard block
     max_r=MAX_RISK.get(name,9999)
     if risk > max_r*1.5:
         return {"fail":True,"hard":True,"score":capped,"reason":f"HARD SL Cap {risk:.5f} > {max_r*1.5:.5f} - Insane","trend":trend,"flags":flags,"details":details}
     if risk > max_r:
         flags.append("SL_WIDE"); details.append(f"SL Wide {risk:.5f} > {max_r} - 0.01 only")
     if risk/entry>0.01: return {"fail":True,"hard":True,"score":capped,"reason":"HARD SL too wide","trend":trend,"flags":flags,"details":details}
-    # V38.6: MIN_SL = flag only, never hard block
+    # V38.8: MIN_SL = flag only, never hard block
     min_sl = MIN_SL.get(name, 0.00040)
     if risk < min_sl:
         flags.append("SL_TIGHT"); details.append(f"SL Tight {risk:.5f} < {min_sl} - 0.01 only")
@@ -916,12 +909,13 @@ def analyze(name,ysym,now,dfs=None):
     elif len(flags)==0 and final_score>=80 and conf>=3 and not chase: tier="A-TIER"; tier_label="A"; take_it="YES - Full"
     elif len(flags)==1: tier="REDUCED RISK"; tier_label="R"; take_it=f"YES - 0.01 only - Flag: {flags[0]}"
     else: tier="SHADOW"; tier_label="SH"; take_it="Shadow only"
-    log_features({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trend":trend,"score":final_score,"raw_score":raw_score,"capped":capped,"tier":tier_label,"flags":"|".join(flags),"rsi":round(float(r),1),"adx":adx_val,"vwap":round(float(vwap_val),2),"htf":htf,"htf4":htf4,"sess":sess_label,"structure":structure_tag,"sweep":sweep_level if sweep_ok else "None","ob":ob_type,"fvg":fvg_fresh,"entry":round(float(entry_b),5),"sl":round(float(sl_b),5),"tp1":round(float(tp1_b),5),"tp2":round(float(tp2_b),5),"risk":round(float(risk),5),"tp1_label":tp1_label,"net_rr":round(float(net_rr),2),"tp2_unrealistic":tp2_unrealistic})
-    return {"symbol":name,"trend":trend,"order_type":order_type,"entry":round(float(entry_b),5),"tech_entry":round(float(tech_entry+off),5),"monitor_entry":round(float(monitor_entry+off),5),"sl":round(float(sl_b),5),"tp1":round(float(tp1_b),5),"tp2":round(float(tp2_b),5),"score":final_score,"raw_score":raw_score,"capped":capped,"cats":cat,"details":details,"tier":tier,"tier_label":tier_label,"take_it":take_it,"live_price":round(float(current+off),5),"rsi":round(float(r),1),"htf":htf,"htf4":htf4,"entry_type":entry_type,"ob_type":ob_type,"ob_quality":ob_quality,"warnings":warnings,"chase":chase,"fvg_inside":fvg_inside,"fvg_fresh":fvg_fresh,"sl_mult":SL_ATR_MULT,"sweep_level":sweep_level if sweep_ok else "None","m1_ok":m1_ok,"tags":tags,"sess_label":sess_label,"is_prime":is_prime,"trend_strength":round(float(trend_strength),0),"trend_label":trend_label,"structure_tag":structure_tag,"adx":adx_val,"vol_label":vol_label,"daily_label":daily_label,"weekly_label":weekly_label,"risk_dist":round(float(risk),5),"vwap":round(float(vwap_val),5),"offset":off,"flags":flags,"atr":atr_val,"tp1_label":tp1_label,"net_rr":round(float(net_rr),2),"tp2_unrealistic":tp2_unrealistic}
+    log_features({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trend":trend,"score":final_score,"raw_score":raw_score,"capped":capped,"tier":tier_label,"flags":"|".join(flags),"rsi":round(float(r),1),"adx":adx_val,"vwap":round(float(vwap_val),2),"htf":htf,"htf4":htf4,"sess":sess_label,"structure":structure_tag,"sweep":sweep_level if sweep_ok else "None","ob":ob_type,"fvg":fvg_fresh,"entry":round(float(entry_b),5),"sl":round(float(sl_b),5),"tp":round(float(tp_b),5),"risk":round(float(risk),5),"net_rr":round(float(net_rr),2)})
+    return {"symbol":name,"trend":trend,"order_type":order_type,"entry":round(float(entry_b),5),"tech_entry":round(float(tech_entry+off),5),"monitor_entry":round(float(monitor_entry+off),5),"sl":round(float(sl_b),5),"tp":round(float(tp_b),5),"score":final_score,"raw_score":raw_score,"capped":capped,"cats":cat,"details":details,"tier":tier,"tier_label":tier_label,"take_it":take_it,"live_price":round(float(current+off),5),"rsi":round(float(r),1),"htf":htf,"htf4":htf4,"entry_type":entry_type,"ob_type":ob_type,"ob_quality":ob_quality,"warnings":warnings,"chase":chase,"fvg_inside":fvg_inside,"fvg_fresh":fvg_fresh,"sl_mult":SL_ATR_MULT,"sweep_level":sweep_level if sweep_ok else "None","m1_ok":m1_ok,"tags":tags,"sess_label":sess_label,"is_prime":is_prime,"trend_strength":round(float(trend_strength),0),"trend_label":trend_label,"structure_tag":structure_tag,"adx":adx_val,"vol_label":vol_label,"daily_label":daily_label,"weekly_label":weekly_label,"risk_dist":round(float(risk),5),"vwap":round(float(vwap_val),5),"offset":off,"flags":flags,"atr":atr_val,"net_rr":round(float(net_rr),2)}
+
 def bot_loop():
     global TOTAL_SIGNALS_TODAY, TOTAL_SHADOW_TODAY
     load_outcomes()
-    send_telegram("V38.6 LIVE - 2-Tier SL\n12 Pairs | No Daily Cap | MIN_SL Flag Only | MAX_RISK 2-Tier | 0 Flags Full | 1 Flag Reduced | 2+ Shadow")
+    send_telegram("V38.8 LIVE - 2-Tier SL\n12 Pairs | No Daily Cap | MIN_SL Flag Only | MAX_RISK 2-Tier | 0 Flags Full | 1 Flag Reduced | 2+ Shadow | SINGLE TP 0.7R")
     sent=set(); last_sent_time={}
     while True:
         try:
@@ -931,7 +925,7 @@ def bot_loop():
             if not (9.0<=hour<21.0): time.sleep(60); continue
             if is_news_time(now): print(f"NEWS BLOCK {now}",flush=True); time.sleep(60); continue
             sess_label,is_prime=get_session_label(now)
-            print(f"V38.6 checking {now} Session {sess_label} Active {len(ACTIVE_TRADES)} Shadow {len(SHADOW_TRADES)} Signals {TOTAL_SIGNALS_TODAY}/999 Shadow {TOTAL_SHADOW_TODAY}/999",flush=True)
+            print(f"V38.8 checking {now} Session {sess_label} Active {len(ACTIVE_TRADES)} Shadow {len(SHADOW_TRADES)} Signals {TOTAL_SIGNALS_TODAY}/999 Shadow {TOTAL_SHADOW_TODAY}/999",flush=True)
             candidates=[]
             for name,ysym in SYMBOLS.items():
                 try:
@@ -948,12 +942,12 @@ def bot_loop():
                     if res and not res.get("fail"): candidates.append(res)
                 except Exception as e: print(f"Error {name}: {e}",flush=True); traceback.print_exc()
             candidates.sort(key=lambda x: x.get("raw_score", x.get("score",0)), reverse=True)
-            print(f"V38.6 candidates ranked: {[(c['symbol'], c['raw_score'], c['flags']) for c in candidates]}",flush=True)
+            print(f"V38.8 candidates ranked: {[(c['symbol'], c['raw_score'], c['flags']) for c in candidates]}",flush=True)
             used_exposure=set(); sent_this_loop=0
             for res in candidates:
                 name=res['symbol']; trend=res['trend']; flags=res.get("flags",[])
                 if PAIR_LOSS_TODAY.get(name,0)>0 and len(flags)>0:
-                    sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp1":res['tp1'],"tp2":res['tp2'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags+["PAIR_LOST_TODAY"],"last_processed":time.time(),"tp1_hit":False}); TOTAL_SHADOW_TODAY+=1; save_outcomes(); continue
+                    sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp":res['tp'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags+["PAIR_LOST_TODAY"],"last_processed":time.time(),"best_favorable":res['entry'],"almost_tp_alerted":False}); TOTAL_SHADOW_TODAY+=1; save_outcomes(); continue
                 blocked=False
                 for grp, pairs in EXPOSURE.items():
                     if name in pairs:
@@ -961,15 +955,15 @@ def bot_loop():
                         if key in used_exposure: blocked=True; break
                 if blocked:
                     if len(flags)<2:
-                        sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp1":res['tp1'],"tp2":res['tp2'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags+["EXPOSURE"],"last_processed":time.time(),"tp1_hit":False}); TOTAL_SHADOW_TODAY+=1; save_outcomes()
+                        sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp":res['tp'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags+["EXPOSURE"],"last_processed":time.time(),"best_favorable":res['entry'],"almost_tp_alerted":False}); TOTAL_SHADOW_TODAY+=1; save_outcomes()
                     continue
                 if len(flags)>=2:
-                    sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp1":res['tp1'],"tp2":res['tp2'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags,"last_processed":time.time(),"tp1_hit":False}); TOTAL_SHADOW_TODAY+=1
+                    sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp":res['tp'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags,"last_processed":time.time(),"best_favorable":res['entry'],"almost_tp_alerted":False}); TOTAL_SHADOW_TODAY+=1
                     for grp, pairs in EXPOSURE.items():
                         if name in pairs: used_exposure.add(f"{grp}_{trend}")
                     save_outcomes(); continue
                 if sent_this_loop>=2:
-                    sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp1":res['tp1'],"tp2":res['tp2'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags+["OVERFLOW"],"last_processed":time.time(),"tp1_hit":False}); TOTAL_SHADOW_TODAY+=1; save_outcomes(); continue
+                    sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp":res['tp'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags+["OVERFLOW"],"last_processed":time.time(),"best_favorable":res['entry'],"almost_tp_alerted":False}); TOTAL_SHADOW_TODAY+=1; save_outcomes(); continue
                 cool=f"{name}-{trend}-{res['tier_label']}"
                 if cool in last_sent_time and (time.time()-last_sent_time[cool])<1800: continue
                 key=f"{name}-{trend}-{res['entry']}-{res['tier_label']}"
@@ -979,24 +973,24 @@ def bot_loop():
                 elif len(flags)==0: flag_txt="\n✅ CLEAN - No flags"
                 yahoo_warn = f"\n⚠️ OFFSET {res.get('offset',0)} applied" if res.get('offset',0)!=0 else ""
                 if res['symbol'] in YAHOO_PROXY_PAIRS: yahoo_warn += "\n⚠️ YAHOO PROXY - CHECK BROKER PRICE!"
-                tp2_note = "\n⚠️ TP2 UNREALISTIC - Take TP1 only" if res.get("tp2_unrealistic") else ""
                 cats=res.get('cats',{})
-                msg=f"SIGNAL - ID {trade_id}\nPair: {res['symbol']} {res['trend']} {res['order_type']}\nEntry: {res['entry']} | SL: {res['sl']} | TP1: {res['tp1']} ({res.get('tp1_label','')}) | TP2: {res['tp2']}{tp2_note}\nScore: Raw {res.get('raw_score')} | Final {res['score']}\nWhy: Structure {cats.get('STRUCTURE',0)}/50 Trend {cats.get('TREND',0)}/25 Momentum {cats.get('MOMENTUM',0)}/25 Context {cats.get('CONTEXT',0)}/20\nTier: {res['tier']} | {res.get('take_it')}{flag_txt}\nReason: {res.get('structure_tag','')} | {res.get('sess_label','')} | Net R:R {res.get('net_rr')} after spread{yahoo_warn}\n⏰ If no TP1 in 20min, close/BE. Don't hold 2h.\nTap ✅ CONFIRM or type: CONFIRM {trade_id}"
+                msg=f"SIGNAL - ID {trade_id}\nPair: {res['symbol']} {res['trend']} {res['order_type']}\nEntry: {res['entry']} | SL: {res['sl']} | TP: {res['tp']} (0.7R)\nScore: Raw {res.get('raw_score')} | Final {res['score']}\nWhy: Structure {cats.get('STRUCTURE',0)}/50 Trend {cats.get('TREND',0)}/25 Momentum {cats.get('MOMENTUM',0)}/25 Context {cats.get('CONTEXT',0)}/20\nTier: {res['tier']} | {res.get('take_it')}{flag_txt}\nReason: {res.get('structure_tag','')} | {res.get('sess_label','')} | Net R:R {res.get('net_rr')} after spread{yahoo_warn}\n⏰ If TP is not reached within 20 minutes after entry touch, close/BE. Don't hold 2h.\nTap ✅ CONFIRM or type: CONFIRM {trade_id}"
                 delivered=send_telegram(msg, trade_id=trade_id)
                 if not delivered: continue
                 for grp, pairs in EXPOSURE.items():
                     if name in pairs: used_exposure.add(f"{grp}_{trend}")
                 PAIR_SIGNAL_COUNT[name]=PAIR_SIGNAL_COUNT.get(name,0)+1; PAIR_LAST_SIGNAL_TIME[name]=time.time(); TOTAL_SIGNALS_TODAY+=1; sent_this_loop+=1; sent.add(key); last_sent_time[cool]=time.time()
-                OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade_id,"tier":res['tier_label'],"trend":res['trend'],"score":res['score'],"raw_score":res.get('raw_score'),"flags":flags,"entry":res['entry'],"sl":res['sl'],"tp1":res['tp1'],"tp2":res['tp2'],"status":"PENDING_CONFIRM"})
-                ACTIVE_TRADES.append({"pair":name,"trade_id":trade_id,"trend":res['trend'],"entry":res['entry'],"tech_entry":res.get('tech_entry'),"sl":res['sl'],"tp1":res['tp1'],"tp2":res['tp2'],"time":time.time(),"tier":res['tier_label'],"tp1_hit":False,"be_done":False,"status":"PENDING_CONFIRM","effective_sl":res['sl'],"last_processed":time.time(),"live_price":res.get('live_price'),"order_type":res.get('order_type'),"atr":res.get('atr',0),"flags":flags})
+                OUTCOME_LOG.append({"time":now.strftime("%Y-%m-%d %H:%M"),"pair":name,"trade_id":trade_id,"tier":res['tier_label'],"trend":res['trend'],"score":res['score'],"raw_score":res.get('raw_score'),"flags":flags,"entry":res['entry'],"sl":res['sl'],"tp":res['tp'],"status":"PENDING_CONFIRM"})
+                ACTIVE_TRADES.append({"pair":name,"trade_id":trade_id,"trend":res['trend'],"entry":res['entry'],"tech_entry":res.get('tech_entry'),"sl":res['sl'],"tp":res['tp'],"time":time.time(),"tier":res['tier_label'],"best_favorable":res['entry'],"almost_tp_alerted":False,"be_done":False,"status":"PENDING_CONFIRM","effective_sl":res['sl'],"last_processed":time.time(),"live_price":res.get('live_price'),"order_type":res.get('order_type'),"atr":res.get('atr',0),"flags":flags})
                 save_outcomes()
             if len(sent)>200: sent.clear()
             gc.collect(); time.sleep(60)
         except Exception as e: print(f"Loop crash {e}",flush=True); traceback.print_exc(); time.sleep(10)
+
 if __name__=="__main__":
     load_outcomes()
     threading.Thread(target=heartbeat,daemon=True).start()
     threading.Thread(target=poll_telegram_loop,daemon=True).start()
     threading.Thread(target=check_active_trades_loop,daemon=True).start()
     threading.Thread(target=bot_loop,daemon=True).start()
-    print("V38.6 - Flask MAIN",flush=True); run_web()
+    print("V38.8 - Flask MAIN",flush=True); run_web()
