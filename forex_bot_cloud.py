@@ -4,11 +4,11 @@ import yfinance as yf
 from flask import Flask
 app = Flask(__name__)
 @app.route('/')
-def home(): return "V38.9 ALIVE", 200
+def home(): return "V39 ALIVE", 200
 @app.route('/health')
 def health(): return "OK", 200
 @app.route('/<path:path>')
-def catch_all(path): return "V38.9 ALIVE", 200
+def catch_all(path): return "V39 ALIVE", 200
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
@@ -400,7 +400,7 @@ def poll_telegram_loop():
                     if p.startswith("T") and len(p)>=4 and p[1:].isdigit(): tid=p; break
                 if cmd=="PING":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
-                    send_telegram("✅ PONG - V38.9 24/5")
+                    send_telegram("✅ PONG - V39 24/5")
                 elif cmd=="RESET_OFFSET":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
                     TELEGRAM_OFFSET=0; send_telegram("✅ Offset reset")
@@ -412,7 +412,7 @@ def poll_telegram_loop():
                 elif cmd=="STATUS":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
                     last = "\n".join([f"{v.get('pair')} {v.get('reason')}" for v in VETO_LOG[-3:]]) if VETO_LOG else "None"
-                    txt=f"V38.9 STATUS 24/5\nSignals {TOTAL_SIGNALS_TODAY}/999 | Shadow {TOTAL_SHADOW_TODAY}/999\nActive {len(ACTIVE_TRADES)} | Shadow active {len(SHADOW_TRADES)}\nOffsets {OFFSETS}\nPair loss today {PAIR_LOSS_TODAY}\nLast hard blocks:\n{last}"
+                    txt=f"V39 STATUS 24/5\nSignals {TOTAL_SIGNALS_TODAY}/999 | Shadow {TOTAL_SHADOW_TODAY}/999\nActive {len(ACTIVE_TRADES)} | Shadow active {len(SHADOW_TRADES)}\nOffsets {OFFSETS}\nPair loss today {PAIR_LOSS_TODAY}\nLast hard blocks:\n{last}"
                     send_telegram(txt)
                 elif cmd=="STATS":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
@@ -420,7 +420,7 @@ def poll_telegram_loop():
                     wr=round(wins/total*100,1) if total>0 else 0
                     rs=[o.get("r") for o in PRICE_OUTCOMES if o.get("r") is not None]
                     avg_r=round(sum(rs)/len(rs),2) if rs else 0
-                    txt=f"📊 V38.9 STATS\nUser: {wins}W / {losses}L = {wr}% WR\nPrice Avg R {avg_r}\nNeed ~45-50% to break even\n\nSHADOW:\n"
+                    txt=f"📊 V39 STATS\nUser: {wins}W / {losses}L = {wr}% WR\nPrice Avg R {avg_r}\nNeed ~45-50% to break even\n\nSHADOW:\n"
                     from collections import defaultdict
                     by_flag=defaultdict(list)
                     for s in SHADOW_OUTCOMES:
@@ -531,9 +531,11 @@ def check_active_trades(now):
             status=trade.get("status","PENDING_CONFIRM")
             if status=="PENDING_CONFIRM":
                 age=(time.time()-trade["time"])/60
+                # V39 FIX: Don't STALE-cancel LIMIT orders - entry is MEANT to be away from price
+                is_limit = "LIMIT" in str(trade.get("order_type",""))
                 try:
                     fresh=get_fresh_price(ysym)
-                    if fresh is not None:
+                    if fresh is not None and not is_limit:
                         atr_v=trade.get("atr",0)
                         if atr_v>0 and abs(fresh-trade["entry"])>atr_v*1.0:
                             send_telegram(f"❌ STALE {name} {trade.get('trade_id')} Price moved >1 ATR from entry - Cancelled")
@@ -897,22 +899,21 @@ def analyze(name,ysym,now,dfs=None):
 def bot_loop():
     global TOTAL_SIGNALS_TODAY, TOTAL_SHADOW_TODAY
     load_outcomes()
-    send_telegram("V38.9 LIVE - 24/5\n12 Pairs | Mon-Fri 24h | Weekend OFF | SINGLE TP 0.7R | MIN_SL Flag Only | MAX_RISK 2-Tier | 0 Flags Full | 1 Flag Reduced | 2+ Shadow")
+    send_telegram("V39 LIVE - 24/5\n12 Pairs | Mon-Fri 24h | Weekend OFF | SINGLE TP 0.7R | SHADOW Fix | LIMIT STALE Fix")
     sent=set(); last_sent_time={}
     while True:
         try:
             tz=pytz.timezone("Africa/Nairobi"); now=dt.now(tz); hour=now.hour+now.minute/60.0
             maybe_reset_daily(now)
-            # V38.9 B: 24/5 - Mon-Fri 24h, Weekend OFF - NO hour block, NO XAUUSD hour block
+            # V39: 24/5 - Mon-Fri 24h, Weekend OFF - NO hour block, NO XAUUSD hour block
             if now.weekday()>=5: time.sleep(60); continue
             if is_news_time(now): print(f"NEWS BLOCK {now}",flush=True); time.sleep(60); continue
             sess_label,is_prime=get_session_label(now)
-            print(f"V38.9 checking {now} Session {sess_label} Active {len(ACTIVE_TRADES)} Shadow {len(SHADOW_TRADES)} Signals {TOTAL_SIGNALS_TODAY}/999 Shadow {TOTAL_SHADOW_TODAY}/999",flush=True)
+            print(f"V39 checking {now} Session {sess_label} Active {len(ACTIVE_TRADES)} Shadow {len(SHADOW_TRADES)} Signals {TOTAL_SIGNALS_TODAY}/999 Shadow {TOTAL_SHADOW_TODAY}/999",flush=True)
             candidates=[]
             for name,ysym in SYMBOLS.items():
                 try:
                     if name in PAIR_COOLDOWN_UNTIL and time.time()<PAIR_COOLDOWN_UNTIL[name]: continue
-                    # V38.9: XAUUSD hour limit REMOVED - trades 24h Mon-Fri
                     if any(t["pair"]==name for t in ACTIVE_TRADES): continue
                     if name in PAIR_LAST_SIGNAL_TIME and (time.time()-PAIR_LAST_SIGNAL_TIME[name]) < COOLDOWN_MIN*60: continue
                     res=analyze(name,ysym,now)
@@ -924,7 +925,7 @@ def bot_loop():
                     if res and not res.get("fail"): candidates.append(res)
                 except Exception as e: print(f"Error {name}: {e}",flush=True); traceback.print_exc()
             candidates.sort(key=lambda x: x.get("raw_score", x.get("score",0)), reverse=True)
-            print(f"V38.9 candidates ranked: {[(c['symbol'], c['raw_score'], c['flags']) for c in candidates]}",flush=True)
+            print(f"V39 candidates ranked: {[(c['symbol'], c['raw_score'], c['flags']) for c in candidates]}",flush=True)
             used_exposure=set(); sent_this_loop=0
             for res in candidates:
                 name=res['symbol']; trend=res['trend']; flags=res.get("flags",[])
@@ -939,7 +940,8 @@ def bot_loop():
                     if len(flags)<2:
                         sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp":res['tp'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags+["EXPOSURE"],"last_processed":time.time(),"best_favorable":res['entry'],"almost_tp_alerted":False}); TOTAL_SHADOW_TODAY+=1; save_outcomes()
                     continue
-                if len(flags)>=2:
+                # V39 FIX: SHADOW tier must NEVER send, even with 0 flags
+                if res.get("tier_label")=="SH" or len(flags)>=2:
                     sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp":res['tp'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags,"last_processed":time.time(),"best_favorable":res['entry'],"almost_tp_alerted":False}); TOTAL_SHADOW_TODAY+=1
                     for grp, pairs in EXPOSURE.items():
                         if name in pairs: used_exposure.add(f"{grp}_{trend}")
@@ -956,7 +958,8 @@ def bot_loop():
                 yahoo_warn = f"\n⚠️ OFFSET {res.get('offset',0)} applied" if res.get('offset',0)!=0 else ""
                 if res['symbol'] in YAHOO_PROXY_PAIRS: yahoo_warn += "\n⚠️ YAHOO PROXY - CHECK BROKER PRICE!"
                 cats=res.get('cats',{})
-                msg=f"SIGNAL - ID {trade_id}\nPair: {res['symbol']} {res['trend']} {res['order_type']}\nEntry: {res['entry']} | SL: {res['sl']} | TP: {res['tp']} (0.7R)\nScore: Raw {res.get('raw_score')} | Final {res['score']}\nWhy: Structure {cats.get('STRUCTURE',0)}/50 Trend {cats.get('TREND',0)}/25 Momentum {cats.get('MOMENTUM',0)}/25 Context {cats.get('CONTEXT',0)}/20\nTier: {res['tier']} | {res.get('take_it')}{flag_txt}\nReason: {res.get('structure_tag','')} | {res.get('sess_label','')} | Net R:R {res.get('net_rr')} after spread{yahoo_warn}\n⏰ If TP is not reached within 20 minutes after entry touch, close/BE. Don't hold 2h.\nTap ✅ CONFIRM or type: CONFIRM {trade_id}"
+                # V39 FIX: removed duplicate trend - was "SELL SELL LIMIT"
+                msg=f"SIGNAL - ID {trade_id}\nPair: {res['symbol']} {res['order_type']}\nEntry: {res['entry']} | SL: {res['sl']} | TP: {res['tp']} (0.7R)\nScore: Raw {res.get('raw_score')} | Final {res['score']}\nWhy: Structure {cats.get('STRUCTURE',0)}/50 Trend {cats.get('TREND',0)}/25 Momentum {cats.get('MOMENTUM',0)}/25 Context {cats.get('CONTEXT',0)}/20\nTier: {res['tier']} | {res.get('take_it')}{flag_txt}\nReason: {res.get('structure_tag','')} | {res.get('sess_label','')} | Net R:R {res.get('net_rr')} after spread{yahoo_warn}\n⏰ If TP is not reached within 20 minutes after entry touch, close/BE. Don't hold 2h.\nTap ✅ CONFIRM or type: CONFIRM {trade_id}"
                 delivered=send_telegram(msg, trade_id=trade_id)
                 if not delivered: continue
                 for grp, pairs in EXPOSURE.items():
@@ -974,4 +977,4 @@ if __name__=="__main__":
     threading.Thread(target=poll_telegram_loop,daemon=True).start()
     threading.Thread(target=check_active_trades_loop,daemon=True).start()
     threading.Thread(target=bot_loop,daemon=True).start()
-    print("V38.9 - Flask MAIN",flush=True); run_web()
+    print("V39 - Flask MAIN",flush=True); run_web()
