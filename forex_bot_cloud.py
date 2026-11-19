@@ -5,11 +5,11 @@ from flask import Flask
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "V38.4 ALIVE", 200
+def home(): return "V38.5 ALIVE", 200
 @app.route('/health')
 def health(): return "OK", 200
 @app.route('/<path:path>')
-def catch_all(path): return "V38.4 ALIVE", 200
+def catch_all(path): return "V38.5 ALIVE", 200
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
@@ -27,8 +27,8 @@ SPREAD = {"XAUUSD":0.30,"GBPJPY":0.03,"US30":5.0,"GBPUSD":0.00015,"EURUSD":0.000
 SL_ATR_MULT = 1.5
 SL_BUFFER = {"US30":20.0,"XAUUSD":2.0,"GBPJPY":0.08,"GBPUSD":0.00020,"EURUSD":0.00020,"EURJPY":0.08,"USDJPY":0.08,"AUDUSD":0.00020,"USDCAD":0.00020,"NZDUSD":0.00020,"USDCHF":0.00020,"EURGBP":0.00020}
 YAHOO_PROXY_PAIRS = {"XAUUSD","US30"}
-MAX_SIGNALS_PER_DAY = 6
-MAX_SHADOW_PER_DAY = 10
+MAX_SIGNALS_PER_DAY = 999
+MAX_SHADOW_PER_DAY = 999
 COOLDOWN_MIN = 15
 EXPOSURE = {"USD": ["EURUSD","GBPUSD","AUDUSD","NZDUSD","USDCAD","USDCHF","USDJPY"], "JPY": ["GBPJPY","EURJPY","USDJPY"], "EUR": ["EURUSD","EURJPY","EURGBP"], "GBP": ["GBPUSD","GBPJPY","EURGBP"], "GOLD": ["XAUUSD"], "US30": ["US30"]}
 CAT_CAPS = {"STRUCTURE":50,"TREND":25,"MOMENTUM":25,"CONTEXT":20}
@@ -104,7 +104,7 @@ def answer_callback(cb_id, text=""):
     except: pass
 def heartbeat():
     while True:
-        print(f"HEARTBEAT {dt.now(pytz.timezone('Africa/Nairobi'))} Active {len(ACTIVE_TRADES)} Shadow {len(SHADOW_TRADES)} Signals {TOTAL_SIGNALS_TODAY}/6 Offsets {OFFSETS} PairLoss {PAIR_LOSS_TODAY}",flush=True); time.sleep(30)
+        print(f"HEARTBEAT {dt.now(pytz.timezone('Africa/Nairobi'))} Active {len(ACTIVE_TRADES)} Shadow {len(SHADOW_TRADES)} Signals {TOTAL_SIGNALS_TODAY}/999 Offsets {OFFSETS} PairLoss {PAIR_LOSS_TODAY}",flush=True); time.sleep(30)
 def ema(values,period):
     k=2/(period+1); e=values[0]
     for v in values[1:]: e=v*k+e*(1-k)
@@ -405,7 +405,7 @@ def poll_telegram_loop():
                     if p.startswith("T") and len(p)>=4 and p[1:].isdigit(): tid=p; break
                 if cmd=="PING":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
-                    send_telegram("✅ PONG - V38.4 Smart Signals")
+                    send_telegram("✅ PONG - V38.5 No Caps")
                 elif cmd=="RESET_OFFSET":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
                     TELEGRAM_OFFSET=0; send_telegram("✅ Offset reset")
@@ -417,7 +417,7 @@ def poll_telegram_loop():
                 elif cmd=="STATUS":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
                     last = "\n".join([f"{v.get('pair')} {v.get('reason')}" for v in VETO_LOG[-3:]]) if VETO_LOG else "None"
-                    txt=f"V38.4 STATUS\nSignals {TOTAL_SIGNALS_TODAY}/6 | Shadow {TOTAL_SHADOW_TODAY}/10\nActive {len(ACTIVE_TRADES)} | Shadow active {len(SHADOW_TRADES)}\nOffsets {OFFSETS}\nPair loss today {PAIR_LOSS_TODAY}\nLast hard blocks:\n{last}"
+                    txt=f"V38.5 STATUS\nSignals {TOTAL_SIGNALS_TODAY}/999 | Shadow {TOTAL_SHADOW_TODAY}/999\nActive {len(ACTIVE_TRADES)} | Shadow active {len(SHADOW_TRADES)}\nOffsets {OFFSETS}\nPair loss today {PAIR_LOSS_TODAY}\nLast hard blocks:\n{last}"
                     send_telegram(txt)
                 elif cmd=="STATS":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
@@ -425,7 +425,7 @@ def poll_telegram_loop():
                     wr=round(wins/total*100,1) if total>0 else 0
                     rs=[o.get("r") for o in PRICE_OUTCOMES if o.get("r") is not None]
                     avg_r=round(sum(rs)/len(rs),2) if rs else 0
-                    txt=f"📊 V38.4 STATS\nUser: {wins}W / {losses}L = {wr}% WR\nPrice Avg R {avg_r}\nNeed ~45-50% to break even\n\nSHADOW:\n"
+                    txt=f"📊 V38.5 STATS\nUser: {wins}W / {losses}L = {wr}% WR\nPrice Avg R {avg_r}\nNeed ~45-50% to break even\n\nSHADOW:\n"
                     from collections import defaultdict
                     by_flag=defaultdict(list)
                     for s in SHADOW_OUTCOMES:
@@ -838,7 +838,6 @@ def analyze(name,ysym,now,dfs=None):
     capped = sum(min(cat[k], CAT_CAPS[k]) for k in cat)
     conf=sum([1 for x in [bos_ok,sweep_ok,fvg_ok,ob_ok] if x])
     if conf<2: flags.append("LOW_CONFLUENCE"); details.append(f"LOW CONFLUENCE {conf}/4")
-    # V38.4: Session-aware - OFF + CHOP + LOW_VOLUME already = 3 flags, no extra veto needed
     if capped < 48 and len(flags) < 2:
         return {"fail":True,"score":capped,"raw_score":raw_score,"capped":capped,"reason":f"Score {capped} < 48","trend":trend,"details":details,"flags":flags,"cats":cat}
     if ob_ok and fvg_found and fvg_distance_ok:
@@ -897,17 +896,16 @@ def analyze(name,ysym,now,dfs=None):
     if trend=="SELL" and y_low is not None and y_low > tp2_b and y_low < tp1_b: flags.append("TP2_UNREALISTIC"); details.append("TP2 beyond Yesterday Low - Take TP1 only"); tp2_unrealistic=True
     spread = SPREAD.get(name,0)
     eff_risk = risk + spread; eff_tp1_dist = abs(tp1_b - entry_b) - spread; eff_tp2_dist = abs(tp2_b - entry_b) - spread
-    # V38.4: If TP2 unrealistic, Net R:R on TP1 only
     net_rr = (eff_tp1_dist / eff_risk) if tp2_unrealistic else (eff_tp2_dist / eff_risk if eff_risk>0 else 0)
     if net_rr < 1.0: flags.append("LOW_NET_RR"); details.append(f"FLAG Net R:R {net_rr:.2f} < 1.0")
-    # V38.4: Spread-aware - spread >30% of risk = flag, never Full
     if risk>0 and spread/risk > 0.30: flags.append("SPREAD_HIGH"); details.append(f"FLAG Spread {spread:.5f} >30% of risk {risk:.5f}")
     max_r=MAX_RISK.get(name,9999)
     if risk>max_r: return {"fail":True,"hard":True,"score":capped,"reason":f"HARD SL Cap {risk:.5f} > {max_r}","trend":trend,"flags":flags,"details":details}
     if risk/entry>0.01: return {"fail":True,"hard":True,"score":capped,"reason":"HARD SL too wide","trend":trend,"flags":flags,"details":details}
+    # V38.5: MIN_SL hard block REMOVED - now just a flag
     min_sl = MIN_SL.get(name, 0.00040)
-    if risk < min_sl: return {"fail":True,"hard":True,"score":capped,"reason":f"HARD SL too small {risk:.5f} < {min_sl}","trend":trend,"flags":flags,"details":details}
-    # V38.4: Final score AFTER all flags
+    if risk < min_sl:
+        flags.append("SL_TIGHT"); details.append(f"SL Tight {risk:.5f} < {min_sl} - 0.01 only")
     flags = list(dict.fromkeys(flags)); final_score = capped - len(flags)*5
     print(f"{name} {trend} Raw {raw_score} Capped {capped} Final {final_score} Flags {flags} RSI {r:.1f} ADX {adx_val} OB {ob_type} FVG {fvg_fresh} H1 {htf} VWAP {vwap_val:.2f} Cats {cat}",flush=True)
     if len(flags)==0 and final_score>=90 and conf>=3 and not chase and (fvg_inside or ob_inside) and rej and m1_ok: tier="S-TIER"; tier_label="S"; take_it="YES - BEST"
@@ -919,7 +917,7 @@ def analyze(name,ysym,now,dfs=None):
 def bot_loop():
     global TOTAL_SIGNALS_TODAY, TOTAL_SHADOW_TODAY
     load_outcomes()
-    send_telegram("V38.4 LIVE - Smart Signals\n12 Pairs | Raw Ranked | 0 Flags Full | 1 Flag Reduced | 2+ Shadow\nTP1 Structure | TP2 Realistic Check | Spread-Aware | Pair Memory | Re-entry 15m\nNo Daily Guardrail - You control risk")
+    send_telegram("V38.5 LIVE - No Caps\n12 Pairs | No Daily Cap | MIN_SL = Flag Only | 0 Flags Full | 1 Flag Reduced | 2+ Shadow\nTP1 Structure | TP2 Realistic | Spread-Aware | Pair Memory | Re-entry 15m")
     sent=set(); last_sent_time={}
     while True:
         try:
@@ -928,9 +926,8 @@ def bot_loop():
             if now.weekday()>=5: time.sleep(60); continue
             if not (9.0<=hour<21.0): time.sleep(60); continue
             if is_news_time(now): print(f"NEWS BLOCK {now}",flush=True); time.sleep(60); continue
-            if TOTAL_SIGNALS_TODAY >= MAX_SIGNALS_PER_DAY and TOTAL_SHADOW_TODAY >= MAX_SHADOW_PER_DAY: time.sleep(60); continue
             sess_label,is_prime=get_session_label(now)
-            print(f"V38.4 checking {now} Session {sess_label} Active {len(ACTIVE_TRADES)} Shadow {len(SHADOW_TRADES)} Signals {TOTAL_SIGNALS_TODAY}/6 Shadow {TOTAL_SHADOW_TODAY}/10",flush=True)
+            print(f"V38.5 checking {now} Session {sess_label} Active {len(ACTIVE_TRADES)} Shadow {len(SHADOW_TRADES)} Signals {TOTAL_SIGNALS_TODAY}/999 Shadow {TOTAL_SHADOW_TODAY}/999",flush=True)
             candidates=[]
             for name,ysym in SYMBOLS.items():
                 try:
@@ -947,35 +944,28 @@ def bot_loop():
                     if res and not res.get("fail"): candidates.append(res)
                 except Exception as e: print(f"Error {name}: {e}",flush=True); traceback.print_exc()
             candidates.sort(key=lambda x: x.get("raw_score", x.get("score",0)), reverse=True)
-            print(f"V38.4 candidates ranked: {[(c['symbol'], c['raw_score'], c['flags']) for c in candidates]}",flush=True)
+            print(f"V38.5 candidates ranked: {[(c['symbol'], c['raw_score'], c['flags']) for c in candidates]}",flush=True)
             used_exposure=set(); sent_this_loop=0
             for res in candidates:
                 name=res['symbol']; trend=res['trend']; flags=res.get("flags",[])
-                # V38.4 Pair Memory: if pair lost today, needs 0 flags
                 if PAIR_LOSS_TODAY.get(name,0)>0 and len(flags)>0:
-                    if TOTAL_SHADOW_TODAY < MAX_SHADOW_PER_DAY:
-                        sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp1":res['tp1'],"tp2":res['tp2'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags+["PAIR_LOST_TODAY"],"last_processed":time.time(),"tp1_hit":False}); TOTAL_SHADOW_TODAY+=1; save_outcomes()
-                    print(f"PAIR MEMORY SHADOW {name} lost today, flags {flags}",flush=True); continue
+                    sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp1":res['tp1'],"tp2":res['tp2'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags+["PAIR_LOST_TODAY"],"last_processed":time.time(),"tp1_hit":False}); TOTAL_SHADOW_TODAY+=1; save_outcomes(); continue
                 blocked=False
                 for grp, pairs in EXPOSURE.items():
                     if name in pairs:
                         key=f"{grp}_{trend}"
                         if key in used_exposure: blocked=True; break
                 if blocked:
-                    if len(flags)<2 and TOTAL_SHADOW_TODAY < MAX_SHADOW_PER_DAY:
+                    if len(flags)<2:
                         sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp1":res['tp1'],"tp2":res['tp2'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags+["EXPOSURE"],"last_processed":time.time(),"tp1_hit":False}); TOTAL_SHADOW_TODAY+=1; save_outcomes()
                     continue
                 if len(flags)>=2:
-                    if TOTAL_SHADOW_TODAY >= MAX_SHADOW_PER_DAY: continue
                     sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp1":res['tp1'],"tp2":res['tp2'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags,"last_processed":time.time(),"tp1_hit":False}); TOTAL_SHADOW_TODAY+=1
                     for grp, pairs in EXPOSURE.items():
                         if name in pairs: used_exposure.add(f"{grp}_{trend}")
                     print(f"SHADOW {sid} {name} {trend} Flags {flags} Raw {res.get('raw_score')}",flush=True); save_outcomes(); continue
-                if TOTAL_SIGNALS_TODAY >= MAX_SIGNALS_PER_DAY: continue
                 if sent_this_loop>=2:
-                    if TOTAL_SHADOW_TODAY < MAX_SHADOW_PER_DAY:
-                        sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp1":res['tp1'],"tp2":res['tp2'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags+["OVERFLOW"],"last_processed":time.time(),"tp1_hit":False}); TOTAL_SHADOW_TODAY+=1; save_outcomes()
-                    continue
+                    sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp1":res['tp1'],"tp2":res['tp2'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags+["OVERFLOW"],"last_processed":time.time(),"tp1_hit":False}); TOTAL_SHADOW_TODAY+=1; save_outcomes(); continue
                 cool=f"{name}-{trend}-{res['tier_label']}"
                 if cool in last_sent_time and (time.time()-last_sent_time[cool])<1800: continue
                 key=f"{name}-{trend}-{res['entry']}-{res['tier_label']}"
@@ -1005,4 +995,4 @@ if __name__=="__main__":
     threading.Thread(target=poll_telegram_loop,daemon=True).start()
     threading.Thread(target=check_active_trades_loop,daemon=True).start()
     threading.Thread(target=bot_loop,daemon=True).start()
-    print("V38.4 - Flask MAIN",flush=True); run_web()
+    print("V38.5 - Flask MAIN",flush=True); run_web()
