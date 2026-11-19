@@ -5,11 +5,11 @@ from flask import Flask
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "V38.5 ALIVE", 200
+def home(): return "V38.6 ALIVE", 200
 @app.route('/health')
 def health(): return "OK", 200
 @app.route('/<path:path>')
-def catch_all(path): return "V38.5 ALIVE", 200
+def catch_all(path): return "V38.6 ALIVE", 200
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
@@ -21,7 +21,7 @@ TRADE_HISTORY_FILE = os.getenv("TRADE_FILE", "trade_history.json")
 FEATURE_LOG = os.getenv("FEATURE_FILE", "feature_log.csv")
 
 SYMBOLS = {"XAUUSD":"GC=F","GBPJPY":"GBPJPY=X","US30":"YM=F","GBPUSD":"GBPUSD=X","EURUSD":"EURUSD=X","EURJPY":"EURJPY=X","USDJPY":"USDJPY=X","AUDUSD":"AUDUSD=X","USDCAD":"USDCAD=X","NZDUSD":"NZDUSD=X","USDCHF":"USDCHF=X","EURGBP":"EURGBP=X"}
-MAX_RISK = {"XAUUSD":5.0,"GBPJPY":0.8,"US30":80.0,"GBPUSD":0.005,"EURUSD":0.005,"EURJPY":0.8,"USDJPY":0.8,"AUDUSD":0.005,"USDCAD":0.005,"NZDUSD":0.005,"USDCHF":0.005,"EURGBP":0.005}
+MAX_RISK = {"XAUUSD":12.0,"GBPJPY":0.8,"US30":120.0,"GBPUSD":0.005,"EURUSD":0.005,"EURJPY":0.8,"USDJPY":0.8,"AUDUSD":0.005,"USDCAD":0.005,"NZDUSD":0.005,"USDCHF":0.005,"EURGBP":0.005}
 MIN_SL = {"XAUUSD":3.0,"GBPJPY":0.12,"US30":40.0,"GBPUSD":0.00080,"EURUSD":0.00080,"EURJPY":0.12,"USDJPY":0.12,"AUDUSD":0.00080,"USDCAD":0.00080,"NZDUSD":0.00080,"USDCHF":0.00080,"EURGBP":0.00080}
 SPREAD = {"XAUUSD":0.30,"GBPJPY":0.03,"US30":5.0,"GBPUSD":0.00015,"EURUSD":0.00012,"EURJPY":0.03,"USDJPY":0.02,"AUDUSD":0.00015,"USDCAD":0.00015,"NZDUSD":0.00018,"USDCHF":0.00015,"EURGBP":0.00015}
 SL_ATR_MULT = 1.5
@@ -405,7 +405,7 @@ def poll_telegram_loop():
                     if p.startswith("T") and len(p)>=4 and p[1:].isdigit(): tid=p; break
                 if cmd=="PING":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
-                    send_telegram("✅ PONG - V38.5 No Caps")
+                    send_telegram("✅ PONG - V38.6 2-Tier SL")
                 elif cmd=="RESET_OFFSET":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
                     TELEGRAM_OFFSET=0; send_telegram("✅ Offset reset")
@@ -417,7 +417,7 @@ def poll_telegram_loop():
                 elif cmd=="STATUS":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
                     last = "\n".join([f"{v.get('pair')} {v.get('reason')}" for v in VETO_LOG[-3:]]) if VETO_LOG else "None"
-                    txt=f"V38.5 STATUS\nSignals {TOTAL_SIGNALS_TODAY}/999 | Shadow {TOTAL_SHADOW_TODAY}/999\nActive {len(ACTIVE_TRADES)} | Shadow active {len(SHADOW_TRADES)}\nOffsets {OFFSETS}\nPair loss today {PAIR_LOSS_TODAY}\nLast hard blocks:\n{last}"
+                    txt=f"V38.6 STATUS\nSignals {TOTAL_SIGNALS_TODAY}/999 | Shadow {TOTAL_SHADOW_TODAY}/999\nActive {len(ACTIVE_TRADES)} | Shadow active {len(SHADOW_TRADES)}\nOffsets {OFFSETS}\nPair loss today {PAIR_LOSS_TODAY}\nLast hard blocks:\n{last}"
                     send_telegram(txt)
                 elif cmd=="STATS":
                     if TELEGRAM_USER_ID and from_id!=str(TELEGRAM_USER_ID): continue
@@ -425,7 +425,7 @@ def poll_telegram_loop():
                     wr=round(wins/total*100,1) if total>0 else 0
                     rs=[o.get("r") for o in PRICE_OUTCOMES if o.get("r") is not None]
                     avg_r=round(sum(rs)/len(rs),2) if rs else 0
-                    txt=f"📊 V38.5 STATS\nUser: {wins}W / {losses}L = {wr}% WR\nPrice Avg R {avg_r}\nNeed ~45-50% to break even\n\nSHADOW:\n"
+                    txt=f"📊 V38.6 STATS\nUser: {wins}W / {losses}L = {wr}% WR\nPrice Avg R {avg_r}\nNeed ~45-50% to break even\n\nSHADOW:\n"
                     from collections import defaultdict
                     by_flag=defaultdict(list)
                     for s in SHADOW_OUTCOMES:
@@ -899,10 +899,14 @@ def analyze(name,ysym,now,dfs=None):
     net_rr = (eff_tp1_dist / eff_risk) if tp2_unrealistic else (eff_tp2_dist / eff_risk if eff_risk>0 else 0)
     if net_rr < 1.0: flags.append("LOW_NET_RR"); details.append(f"FLAG Net R:R {net_rr:.2f} < 1.0")
     if risk>0 and spread/risk > 0.30: flags.append("SPREAD_HIGH"); details.append(f"FLAG Spread {spread:.5f} >30% of risk {risk:.5f}")
+    # V38.6: 2-TIER MAX_RISK - slightly wide = flag, insanely wide = hard block
     max_r=MAX_RISK.get(name,9999)
-    if risk>max_r: return {"fail":True,"hard":True,"score":capped,"reason":f"HARD SL Cap {risk:.5f} > {max_r}","trend":trend,"flags":flags,"details":details}
+    if risk > max_r*1.5:
+        return {"fail":True,"hard":True,"score":capped,"reason":f"HARD SL Cap {risk:.5f} > {max_r*1.5:.5f} - Insane","trend":trend,"flags":flags,"details":details}
+    if risk > max_r:
+        flags.append("SL_WIDE"); details.append(f"SL Wide {risk:.5f} > {max_r} - 0.01 only")
     if risk/entry>0.01: return {"fail":True,"hard":True,"score":capped,"reason":"HARD SL too wide","trend":trend,"flags":flags,"details":details}
-    # V38.5: MIN_SL hard block REMOVED - now just a flag
+    # V38.6: MIN_SL = flag only, never hard block
     min_sl = MIN_SL.get(name, 0.00040)
     if risk < min_sl:
         flags.append("SL_TIGHT"); details.append(f"SL Tight {risk:.5f} < {min_sl} - 0.01 only")
@@ -917,7 +921,7 @@ def analyze(name,ysym,now,dfs=None):
 def bot_loop():
     global TOTAL_SIGNALS_TODAY, TOTAL_SHADOW_TODAY
     load_outcomes()
-    send_telegram("V38.5 LIVE - No Caps\n12 Pairs | No Daily Cap | MIN_SL = Flag Only | 0 Flags Full | 1 Flag Reduced | 2+ Shadow\nTP1 Structure | TP2 Realistic | Spread-Aware | Pair Memory | Re-entry 15m")
+    send_telegram("V38.6 LIVE - 2-Tier SL\n12 Pairs | No Daily Cap | MIN_SL Flag Only | MAX_RISK 2-Tier | 0 Flags Full | 1 Flag Reduced | 2+ Shadow")
     sent=set(); last_sent_time={}
     while True:
         try:
@@ -927,7 +931,7 @@ def bot_loop():
             if not (9.0<=hour<21.0): time.sleep(60); continue
             if is_news_time(now): print(f"NEWS BLOCK {now}",flush=True); time.sleep(60); continue
             sess_label,is_prime=get_session_label(now)
-            print(f"V38.5 checking {now} Session {sess_label} Active {len(ACTIVE_TRADES)} Shadow {len(SHADOW_TRADES)} Signals {TOTAL_SIGNALS_TODAY}/999 Shadow {TOTAL_SHADOW_TODAY}/999",flush=True)
+            print(f"V38.6 checking {now} Session {sess_label} Active {len(ACTIVE_TRADES)} Shadow {len(SHADOW_TRADES)} Signals {TOTAL_SIGNALS_TODAY}/999 Shadow {TOTAL_SHADOW_TODAY}/999",flush=True)
             candidates=[]
             for name,ysym in SYMBOLS.items():
                 try:
@@ -944,7 +948,7 @@ def bot_loop():
                     if res and not res.get("fail"): candidates.append(res)
                 except Exception as e: print(f"Error {name}: {e}",flush=True); traceback.print_exc()
             candidates.sort(key=lambda x: x.get("raw_score", x.get("score",0)), reverse=True)
-            print(f"V38.5 candidates ranked: {[(c['symbol'], c['raw_score'], c['flags']) for c in candidates]}",flush=True)
+            print(f"V38.6 candidates ranked: {[(c['symbol'], c['raw_score'], c['flags']) for c in candidates]}",flush=True)
             used_exposure=set(); sent_this_loop=0
             for res in candidates:
                 name=res['symbol']; trend=res['trend']; flags=res.get("flags",[])
@@ -963,7 +967,7 @@ def bot_loop():
                     sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp1":res['tp1'],"tp2":res['tp2'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags,"last_processed":time.time(),"tp1_hit":False}); TOTAL_SHADOW_TODAY+=1
                     for grp, pairs in EXPOSURE.items():
                         if name in pairs: used_exposure.add(f"{grp}_{trend}")
-                    print(f"SHADOW {sid} {name} {trend} Flags {flags} Raw {res.get('raw_score')}",flush=True); save_outcomes(); continue
+                    save_outcomes(); continue
                 if sent_this_loop>=2:
                     sid=new_shadow_id(); SHADOW_TRADES.append({"pair":name,"shadow_id":sid,"trend":trend,"entry":res['entry'],"sl":res['sl'],"tp1":res['tp1'],"tp2":res['tp2'],"time":time.time(),"status":"SHADOW_PENDING","flags":flags+["OVERFLOW"],"last_processed":time.time(),"tp1_hit":False}); TOTAL_SHADOW_TODAY+=1; save_outcomes(); continue
                 cool=f"{name}-{trend}-{res['tier_label']}"
@@ -995,4 +999,4 @@ if __name__=="__main__":
     threading.Thread(target=poll_telegram_loop,daemon=True).start()
     threading.Thread(target=check_active_trades_loop,daemon=True).start()
     threading.Thread(target=bot_loop,daemon=True).start()
-    print("V38.5 - Flask MAIN",flush=True); run_web()
+    print("V38.6 - Flask MAIN",flush=True); run_web()
